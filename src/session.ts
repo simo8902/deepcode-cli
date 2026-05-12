@@ -1632,7 +1632,7 @@ ${skillMd}
     const messageParams: { tool_calls?: unknown[]; reasoning_content?: string } | null =
       toolCalls || hasReasoningContent ? {} : null;
     if (toolCalls) {
-      messageParams!.tool_calls = sanitizeToolCallsForReplay(toolCalls) ?? [];
+      messageParams!.tool_calls = sanitizeForModelPipeline(toolCalls).value as unknown[];
     }
     if (hasReasoningContent) {
       messageParams!.reasoning_content = reasoningContent;

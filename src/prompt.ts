@@ -318,7 +318,14 @@ export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
   return `${COMPACT_PROMPT_BASE}\n\nconversation below:\n\n\`\`\`jsonl\n${jsonl}\n\`\`\``;
 }
 
+const runtimeContextCache = new Map<string, string>();
+
 function getRuntimeContext(projectRoot: string): string {
+  const cached = runtimeContextCache.get(projectRoot);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const uname = getUnameInfo();
   const shellModeOpts = process.platform === "win32" ? { "shell mode": "git-bash" } : {};
   const runtimeVersions = getRuntimeVersionInfo();
@@ -334,9 +341,9 @@ function getRuntimeContext(projectRoot: string): string {
       "jq": checkToolInstalled("jq")
     }
   };
-  return `# Local Workspace Environment\n\n\`\`\`json
-${JSON.stringify(env, null, 2)}
-\`\`\``;
+  const result = `# Local Workspace Environment\n\n\`\`\`json\n${JSON.stringify(env, null, 2)}\n\`\`\``;
+  runtimeContextCache.set(projectRoot, result);
+  return result;
 }
 
 function checkToolInstalled(tool: string): boolean {
