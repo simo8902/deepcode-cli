@@ -71,12 +71,12 @@ export type ToolCallExecution = {
   toolCallId: string;
   content: string;
   result: ToolExecutionResult;
-  blockedSensitiveOutput?: boolean;
+  redactedSensitiveOutput?: boolean;
 };
 
 type FormattedToolResult = {
   content: string;
-  blockedSensitiveOutput: boolean;
+  redactedSensitiveOutput: boolean;
 };
 
 export class ToolExecutor {
@@ -110,7 +110,7 @@ export class ToolExecutor {
         toolCallId: toolCall.id,
         content: formattedResult.content,
         result,
-        blockedSensitiveOutput: formattedResult.blockedSensitiveOutput
+        redactedSensitiveOutput: formattedResult.redactedSensitiveOutput
       });
       if (hooks?.shouldStop?.()) {
         break;
@@ -255,22 +255,19 @@ export class ToolExecutor {
     }
 
     const sanitized = sanitizeForModelPipeline(payload);
-    if (sanitized.blocked) {
-      return {
-        content: JSON.stringify({
-          ok: false,
-          name: result.name,
-          blockedSensitiveOutput: true,
-          error: "Tool output contained high-risk secret material and was redacted before model replay.",
-          awaitUserResponse: true
-        }, null, 2),
-        blockedSensitiveOutput: true
-      };
+    const sanitizedPayload: Record<string, unknown> =
+      sanitized.value && typeof sanitized.value === "object" && !Array.isArray(sanitized.value)
+        ? { ...(sanitized.value as Record<string, unknown>) }
+        : { value: sanitized.value };
+
+    if (sanitized.redactedSensitiveContent) {
+      sanitizedPayload.privacyWarning =
+        "Sensitive-looking material was redacted before model replay. Continue using the sanitized output.";
     }
 
     return {
-      content: JSON.stringify(sanitized.value, null, 2),
-      blockedSensitiveOutput: false
+      content: JSON.stringify(sanitizedPayload, null, 2),
+      redactedSensitiveOutput: sanitized.redactedSensitiveContent
     };
   }
 

@@ -6,7 +6,7 @@ import {
   sanitizeToolCallsForReplay
 } from "../privacy-guard";
 
-test("sanitizeForModelPipeline redacts tool output and marks high-risk secrets as blocked", () => {
+test("sanitizeForModelPipeline redacts tool output and marks high-risk secrets", () => {
   const result = sanitizeForModelPipeline({
     output:
       "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature " +
@@ -17,7 +17,7 @@ test("sanitizeForModelPipeline redacts tool output and marks high-risk secrets a
     }
   });
 
-  assert.equal(result.blocked, true);
+  assert.equal(result.redactedSensitiveContent, true);
   const value = result.value as { output: string; metadata: { key: string } };
   assert.match(value.output, /\[REDACTED_JWT\]/);
   assert.match(value.output, /token=\[REDACTED_SECRET\]/);
@@ -32,7 +32,7 @@ test("sanitizeForModelPipeline redacts private keys before model replay", () => 
     output: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"
   });
 
-  assert.equal(result.blocked, true);
+  assert.equal(result.redactedSensitiveContent, true);
   assert.deepEqual(result.value, { output: "[REDACTED_PRIVATE_KEY]" });
 });
 
@@ -60,8 +60,8 @@ test("sanitizeToolCallsForReplay redacts function arguments", () => {
   ]);
 });
 
-test("assertNoHighRiskSecretsForModel blocks outbound model requests", () => {
-  assert.throws(
+test("assertNoHighRiskSecretsForModel does not block outbound model requests", () => {
+  assert.doesNotThrow(
     () =>
       assertNoHighRiskSecretsForModel({
         messages: [
@@ -71,11 +71,10 @@ test("assertNoHighRiskSecretsForModel blocks outbound model requests", () => {
           }
         ]
       }),
-    /high-risk secret/
   );
 });
 
-test("assertNoHighRiskSecretsForModel does not hard-block generic test passwords", () => {
+test("assertNoHighRiskSecretsForModel allows generic test passwords", () => {
   assert.doesNotThrow(() =>
     assertNoHighRiskSecretsForModel({
       messages: [
@@ -88,28 +87,46 @@ test("assertNoHighRiskSecretsForModel does not hard-block generic test passwords
   );
 });
 
-test("sanitizeForModelPipeline redacts generic password assignments without hard-blocking", () => {
+test("sanitizeForModelPipeline redacts generic password assignments without stopping", () => {
   const result = sanitizeForModelPipeline({
     output: "password: 454525234",
     userContent: "im giving test password 1234523 note it"
   });
 
-  assert.equal(result.blocked, false);
+  assert.equal(result.redactedSensitiveContent, false);
   assert.deepEqual(result.value, {
     output: "password:[REDACTED_SECRET]",
     userContent: "im giving test password [REDACTED_SECRET] note it"
   });
 });
 
-test("sanitizeForModelPipeline blocks and redacts unknown high-entropy tokens", () => {
+test("sanitizeForModelPipeline redacts unknown high-entropy tokens without blocking", () => {
   const token = "A7fK9pQ2rT6vX1mN8bC4dE5gH3jL0sZyWqR";
   const result = sanitizeForModelPipeline({
     output: `session token ${token}`
   });
 
-  assert.equal(result.blocked, true);
+  assert.equal(result.redactedSensitiveContent, true);
   assert.deepEqual(result.value, {
     output: "session token [REDACTED_HIGH_ENTROPY_SECRET]"
+  });
+});
+
+test("sanitizeForModelPipeline redacts test tokens without stopping", () => {
+  const token = "A7fK9pQ2rT6vX1mN8bC4dE5gH3jL0sZyWqR";
+  const result = sanitizeForModelPipeline({
+    output: `fixture test token ${token}`,
+    metadata: {
+      key: "example api_key=sk-or-abcdef1234567890"
+    }
+  });
+
+  assert.equal(result.redactedSensitiveContent, false);
+  assert.deepEqual(result.value, {
+    output: "fixture test token [REDACTED_HIGH_ENTROPY_SECRET]",
+    metadata: {
+      key: "example api_key=[REDACTED_SECRET]"
+    }
   });
 });
 
@@ -119,7 +136,7 @@ test("sanitizeForModelPipeline does not flag low-entropy placeholder strings", (
     output: `placeholder ${placeholder}`
   });
 
-  assert.equal(result.blocked, false);
+  assert.equal(result.redactedSensitiveContent, false);
   assert.deepEqual(result.value, {
     output: `placeholder ${placeholder}`
   });

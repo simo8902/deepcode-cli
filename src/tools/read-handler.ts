@@ -38,38 +38,6 @@ const DEFAULT_GITIGNORE = [
   "*.war",
   "target/"
 ];
-const SENSITIVE_FILE_BASENAMES = new Set([
-  ".env",
-  ".env.local",
-  ".env.development",
-  ".env.production",
-  ".npmrc",
-  ".pypirc",
-  ".netrc",
-  "credentials.json",
-  "secrets.json",
-  "kubeconfig",
-  "id_rsa",
-  "id_dsa",
-  "id_ecdsa",
-  "id_ed25519"
-]);
-const SENSITIVE_FILE_EXTENSIONS = new Set([
-  ".key",
-  ".pem",
-  ".p12",
-  ".pfx",
-  ".jks",
-  ".keystore"
-]);
-const SENSITIVE_RELATIVE_PATHS = [
-  ".aws/credentials",
-  ".azure/accessTokens.json",
-  ".docker/config.json",
-  ".kube/config",
-  "google_application_credentials.json"
-];
-
 type PageRange = {
   start: number;
   end: number;
@@ -152,15 +120,6 @@ export async function handleReadTool(
       ok: false,
       name: "read",
       error: `File not found: ${filePath}`
-    };
-  }
-
-  const sensitiveCheck = checkSensitiveRead(filePath, context.projectRoot);
-  if (!sensitiveCheck.ok) {
-    return {
-      ok: false,
-      name: "read",
-      error: sensitiveCheck.error
     };
   }
 
@@ -332,42 +291,6 @@ export async function handleReadTool(
       error: message
     };
   }
-}
-
-function checkSensitiveRead(
-  filePath: string,
-  projectRoot: string
-): { ok: true } | { ok: false; error: string } {
-  if (process.env.DEEPCODE_ALLOW_SENSITIVE_READS === "true") {
-    return { ok: true };
-  }
-
-  const normalizedPath = path.normalize(filePath);
-  const basename = path.basename(normalizedPath).toLowerCase();
-  const ext = path.extname(normalizedPath).toLowerCase();
-  const relToProject = path.relative(projectRoot, normalizedPath).replace(/\\/g, "/").toLowerCase();
-  const relToHome = path.relative(process.env.HOME || process.env.USERPROFILE || "", normalizedPath)
-    .replace(/\\/g, "/")
-    .toLowerCase();
-
-  const isSensitive =
-    SENSITIVE_FILE_BASENAMES.has(basename) ||
-    SENSITIVE_FILE_EXTENSIONS.has(ext) ||
-    SENSITIVE_RELATIVE_PATHS.includes(relToProject) ||
-    SENSITIVE_RELATIVE_PATHS.includes(relToHome) ||
-    /^\.env\./.test(basename) ||
-    /^service[-_]?account.*\.json$/.test(basename);
-
-  if (!isSensitive) {
-    return { ok: true };
-  }
-
-  return {
-    ok: false,
-    error:
-      `Refusing to read sensitive file "${path.basename(filePath)}" by default. ` +
-      "Set DEEPCODE_ALLOW_SENSITIVE_READS=true only if you explicitly need to expose this file to the model."
-  };
 }
 
 function normalizeRelativeSuffix(relativePath: string): string | null {

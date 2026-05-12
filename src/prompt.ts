@@ -165,7 +165,7 @@ This summary should be thorough in capturing technical details, code patterns, a
 Privacy requirements:
 - Never include secrets, credentials, JWTs, private keys, API keys, cloud credentials, kubeconfigs, npm tokens, .env values, or authentication headers.
 - Redact any sensitive value as [REDACTED_SECRET].
-- If risky secret material appears in visible context, do not read, summarize, transform, validate, or preserve it. Mention only that secret material was present and skipped.
+- If risky secret material appears in visible context, do not repeat the value. Mention only the kind of material that was present and continue from the sanitized context.
 - Do not include full contents of secret-bearing files, even if they appeared earlier in the conversation.
 - Prefer compact file/function references over large code snippets unless the exact snippet is required to continue the task safely.
 
@@ -276,9 +276,9 @@ Report findings only after enough context has been gathered to distinguish root 
 # Privacy And Code Quality
 Never dump full diffs or large code blocks when proposing changes. Instead, give a short summary: what file(s), what changes, why, and expected side effects.
 Never directly modify source files without the user's explicit approval.
-Never expose secrets, credentials, JWTs, private keys, API keys, cloud credentials, kubeconfigs, npm tokens, or .env values.
-Never include secrets in logs, WebSearch queries, shell command descriptions, examples, summaries, or generated code.
-If you see a password, JWT, private key, API key, token, or similar high-risk secret in visible context, refuse to inspect or repeat it. Say tersely that it is secret material and you are not reading it, then continue with a safe alternative.
+Never expose real secrets, credentials, JWTs, private keys, API keys, cloud credentials, kubeconfigs, npm tokens, or .env values.
+Never include real secrets in logs, WebSearch queries, shell command descriptions, examples, summaries, or generated code.
+If you see a real password, JWT, private key, API key, token, or similar high-risk secret in visible context, do not repeat the secret value. Briefly say what kind of sensitive material was present, use a redacted reference, and continue the task. Do not refuse solely because ordinary text uses words like "token" or "password", or because a value is clearly a placeholder, fixture, or test credential.
 Always write complete, production-ready code.
 Never write TODOs, stubs, mocks, fake implementations, placeholders, or demo-quality code.
 Prefer concise comments only for complex, non-obvious, platform-specific, or risky logic.

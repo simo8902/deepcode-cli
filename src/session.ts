@@ -14,7 +14,6 @@ import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { logApiError } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
 import {
-  assertNoHighRiskSecretsForModel,
   sanitizeForModelPipeline,
   sanitizeToolCallsForReplay
 } from "./privacy-guard";
@@ -302,7 +301,6 @@ export class SessionManager {
     let response: unknown;
     let outboundRequest: Record<string, unknown> = streamRequest;
     try {
-      assertNoHighRiskSecretsForModel(streamRequest);
       outboundRequest = sanitizeForModelPipeline(streamRequest).value as Record<string, unknown>;
       this.logFinalHttpBody(requestId, sessionId, outboundRequest);
       response = await (client.chat.completions.create as unknown as (
@@ -1697,14 +1695,13 @@ ${skillMd}
     }
     let waitingForUser = false;
     const followUpMessages: SessionMessage[] = [];
-    let blockedSensitiveOutput = false;
+    let redactedSensitiveOutput = false;
     for (const execution of toolExecutions) {
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
       }
-      if (execution.blockedSensitiveOutput === true) {
-        waitingForUser = true;
-        blockedSensitiveOutput = true;
+      if (execution.redactedSensitiveOutput === true) {
+        redactedSensitiveOutput = true;
       }
       const toolFunction = this.findSanitizedToolFunction(toolCalls, execution.toolCallId);
       const toolMessage = this.buildToolMessage(
@@ -1733,14 +1730,14 @@ ${skillMd}
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
     }
-    if (blockedSensitiveOutput) {
-      const blockedMessage = this.buildAssistantMessage(
+    if (redactedSensitiveOutput) {
+      const warningMessage = this.buildAssistantMessage(
         sessionId,
-        "yo thats secret material, im not reading that shit. I blocked it before it could be sent to the model.",
+        "Sensitive-looking material was found and redacted before model replay. Continuing with the sanitized output.",
         null
       );
-      this.appendSessionMessage(sessionId, blockedMessage);
-      this.onAssistantMessage(blockedMessage, true);
+      this.appendSessionMessage(sessionId, warningMessage);
+      this.onAssistantMessage(warningMessage, true);
     }
     return { waitingForUser };
   }

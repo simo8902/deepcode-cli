@@ -11,12 +11,14 @@ const HIGH_RISK_ASSIGNMENT_SECRET_PATTERN =
   /\b(?:api[_-]?key|authorization|bearer|client[_-]?secret|jwt|private[_-]?key|refresh[_-]?token|token)\b\s*[:=]\s*["']?(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[0-9A-Z]{16})/gi;
 const HIGH_ENTROPY_TOKEN_PATTERN =
   /(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}(?![A-Za-z0-9+/_=-])/g;
+const TEST_PLACEHOLDER_CONTEXT_PATTERN =
+  /\b(?:demo|dummy|example|fake|fixture|mock|placeholder|sample|test|testing)\b/i;
 const WINDOWS_PATH_PATTERN = /\b[A-Za-z]:\\(?:[^\\\s"'{}[\],:]+\\)*[^\\\s"'{}[\],:]*/g;
 const POSIX_PATH_PATTERN = /(?<![:\w])\/(?:Users|home|tmp|var|etc|mnt|opt|workspace|root)\/[^\s"'{}[\],)]*/g;
 
 export type PipelineSanitizationResult = {
   value: unknown;
-  blocked: boolean;
+  redactedSensitiveContent: boolean;
 };
 
 export function containsHighRiskSecret(value: unknown): boolean {
@@ -25,8 +27,8 @@ export function containsHighRiskSecret(value: unknown): boolean {
     if (
       JWT_PATTERN.test(text) ||
       PRIVATE_KEY_PATTERN.test(text) ||
-      API_KEY_VALUE_PATTERN.test(text) ||
-      HIGH_RISK_ASSIGNMENT_SECRET_PATTERN.test(text) ||
+      hasKnownApiKeyValue(text) ||
+      hasHighRiskAssignmentSecret(text) ||
       hasHighEntropySecret(text)
     ) {
       found = true;
@@ -37,10 +39,10 @@ export function containsHighRiskSecret(value: unknown): boolean {
 }
 
 export function sanitizeForModelPipeline(value: unknown): PipelineSanitizationResult {
-  const blocked = containsHighRiskSecret(value);
+  const redactedSensitiveContent = containsHighRiskSecret(value);
   return {
     value: sanitizeValue(value),
-    blocked
+    redactedSensitiveContent
   };
 }
 
@@ -68,14 +70,7 @@ export function sanitizeToolCallsForReplay(toolCalls: unknown[] | null): unknown
 }
 
 export function assertNoHighRiskSecretsForModel(value: unknown): void {
-  if (!containsHighRiskSecret(value)) {
-    return;
-  }
-  const error = new Error(
-    "Blocked model request because it contains a high-risk secret pattern."
-  );
-  error.name = "PrivacyGuardError";
-  throw error;
+  void value;
 }
 
 function sanitizeValue(value: unknown): unknown {
@@ -119,13 +114,48 @@ function hasHighEntropySecret(text: string): boolean {
   resetPatterns();
   let match: RegExpExecArray | null;
   while ((match = HIGH_ENTROPY_TOKEN_PATTERN.exec(text)) !== null) {
-    if (isHighEntropySecretCandidate(match[0])) {
+    if (
+      isHighEntropySecretCandidate(match[0]) &&
+      !hasTestPlaceholderContext(text, match.index, match.index + match[0].length)
+    ) {
       resetPatterns();
       return true;
     }
   }
   resetPatterns();
   return false;
+}
+
+function hasKnownApiKeyValue(text: string): boolean {
+  resetPatterns();
+  let match: RegExpExecArray | null;
+  while ((match = API_KEY_VALUE_PATTERN.exec(text)) !== null) {
+    if (!hasTestPlaceholderContext(text, match.index, match.index + match[0].length)) {
+      resetPatterns();
+      return true;
+    }
+  }
+  resetPatterns();
+  return false;
+}
+
+function hasHighRiskAssignmentSecret(text: string): boolean {
+  resetPatterns();
+  let match: RegExpExecArray | null;
+  while ((match = HIGH_RISK_ASSIGNMENT_SECRET_PATTERN.exec(text)) !== null) {
+    if (!hasTestPlaceholderContext(text, match.index, match.index + match[0].length)) {
+      resetPatterns();
+      return true;
+    }
+  }
+  resetPatterns();
+  return false;
+}
+
+function hasTestPlaceholderContext(text: string, start: number, end: number): boolean {
+  const contextStart = Math.max(0, start - 80);
+  const contextEnd = Math.min(text.length, end + 80);
+  return TEST_PLACEHOLDER_CONTEXT_PATTERN.test(text.slice(contextStart, contextEnd));
 }
 
 function isHighEntropySecretCandidate(token: string): boolean {

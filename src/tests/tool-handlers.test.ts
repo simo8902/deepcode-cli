@@ -63,7 +63,7 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
   );
 });
 
-test("Read refuses obvious secret-bearing files by default", async () => {
+test("Read allows obvious secret-bearing files", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, ".env");
   fs.writeFileSync(filePath, "JWT_PRIVATE_KEY=secret\n", "utf8");
@@ -73,32 +73,8 @@ test("Read refuses obvious secret-bearing files by default", async () => {
     createContext("sensitive-read", workspace)
   );
 
-  assert.equal(readResult.ok, false);
-  assert.match(readResult.error ?? "", /Refusing to read sensitive file/);
-});
-
-test("Read can explicitly allow sensitive files via environment override", async () => {
-  const workspace = createTempWorkspace();
-  const filePath = path.join(workspace, ".env");
-  fs.writeFileSync(filePath, "JWT_PRIVATE_KEY=secret\n", "utf8");
-  const original = process.env.DEEPCODE_ALLOW_SENSITIVE_READS;
-  process.env.DEEPCODE_ALLOW_SENSITIVE_READS = "true";
-
-  try {
-    const readResult = await handleReadTool(
-      { file_path: filePath },
-      createContext("sensitive-read-override", workspace)
-    );
-
-    assert.equal(readResult.ok, true);
-    assert.match(readResult.output ?? "", /JWT_PRIVATE_KEY=secret/);
-  } finally {
-    if (original === undefined) {
-      delete process.env.DEEPCODE_ALLOW_SENSITIVE_READS;
-    } else {
-      process.env.DEEPCODE_ALLOW_SENSITIVE_READS = original;
-    }
-  }
+  assert.equal(readResult.ok, true);
+  assert.match(readResult.output ?? "", /JWT_PRIVATE_KEY=secret/);
 });
 
 test("Edit returns candidate match snippets when old_string is not unique", async () => {
