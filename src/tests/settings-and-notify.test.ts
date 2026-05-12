@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../notify";
-import { applyModelConfigSelection, resolveSettings } from "../settings";
+import { resolveSettings } from "../settings";
 
 test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool", () => {
   const resolved = resolveSettings(
@@ -9,17 +9,17 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
       env: {
         MODEL: "deepseek-v3.2",
         BASE_URL: "https://example.com/v1",
-        API_KEY: "sk-test",
+        API_KEY: "sk-test"
       },
       thinkingEnabled: true,
       reasoningEffort: "high",
       debugLogEnabled: true,
       notify: "  /tmp/notify.sh  ",
-      webSearchTool: "  /tmp/web-search.sh  ",
+      webSearchTool: "  /tmp/web-search.sh  "
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
@@ -33,38 +33,21 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
   assert.equal(resolved.webSearchTool, "/tmp/web-search.sh");
 });
 
-test("resolveSettings gives top-level model priority over env MODEL", () => {
-  const resolved = resolveSettings(
-    {
-      model: "deepseek-v4-flash",
-      env: {
-        MODEL: "deepseek-v4-pro",
-      },
-    },
-    {
-      model: "default-model",
-      baseURL: "https://default.example.com",
-    }
-  );
-
-  assert.equal(resolved.model, "deepseek-v4-flash");
-});
-
 test("resolveSettings still accepts legacy env.THINKING and defaults reasoning effort when absent", () => {
   const resolved = resolveSettings(
     {
       env: {
-        THINKING: "enabled",
-      },
+        THINKING: "enabled"
+      }
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
   assert.equal(resolved.thinkingEnabled, true);
-  assert.equal(resolved.reasoningEffort, "max");
+  assert.equal(resolved.reasoningEffort, "xhigh");
   assert.equal(resolved.model, "default-model");
   assert.equal(resolved.baseURL, "https://default.example.com");
 });
@@ -73,12 +56,12 @@ test("resolveSettings defaults DeepSeek v4 models to thinking mode", () => {
   const resolved = resolveSettings(
     {
       env: {
-        MODEL: "deepseek-v4-flash",
-      },
+        MODEL: "deepseek-v4-flash"
+      }
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
@@ -90,7 +73,7 @@ test("resolveSettings applies thinking defaults to the fallback model", () => {
     {},
     {
       model: "deepseek-v4-pro",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
@@ -102,12 +85,12 @@ test("resolveSettings keeps thinking mode off by default for other models", () =
   const resolved = resolveSettings(
     {
       env: {
-        MODEL: "deepseek-v3.2",
-      },
+        MODEL: "deepseek-v3.2"
+      }
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
@@ -118,111 +101,45 @@ test("resolveSettings allows explicit thinkingEnabled to override model defaults
   const resolved = resolveSettings(
     {
       env: {
-        MODEL: "deepseek-v4-pro",
+        MODEL: "deepseek-v4-pro"
       },
-      thinkingEnabled: false,
+      thinkingEnabled: false
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
   assert.equal(resolved.thinkingEnabled, false);
 });
 
-test("resolveSettings defaults invalid reasoning effort to max", () => {
+test("resolveSettings defaults invalid reasoning effort to xhigh", () => {
   const resolved = resolveSettings(
     {
-      reasoningEffort: "medium" as never,
+      reasoningEffort: "medium" as never
     },
     {
       model: "default-model",
-      baseURL: "https://default.example.com",
+      baseURL: "https://default.example.com"
     }
   );
 
-  assert.equal(resolved.reasoningEffort, "max");
+  assert.equal(resolved.reasoningEffort, "xhigh");
 });
 
-test("applyModelConfigSelection writes model only when the effective model changes or already exists", () => {
-  const result = applyModelConfigSelection(
+test("resolveSettings maps max reasoning effort to xhigh", () => {
+  const resolved = resolveSettings(
     {
-      env: {
-        MODEL: "deepseek-v4-pro",
-      },
-      thinkingEnabled: false,
+      reasoningEffort: "max" as never
     },
     {
-      model: "deepseek-v4-pro",
-      thinkingEnabled: false,
-      reasoningEffort: "max",
-    },
-    {
-      model: "deepseek-v4-pro",
-      thinkingEnabled: true,
-      reasoningEffort: "high",
+      model: "default-model",
+      baseURL: "https://default.example.com"
     }
   );
 
-  assert.equal(result.changed, true);
-  assert.equal(result.settings.model, undefined);
-  assert.equal(result.settings.thinkingEnabled, true);
-  assert.equal(result.settings.reasoningEffort, "high");
-});
-
-test("applyModelConfigSelection persists a new selected model and thinking option", () => {
-  const result = applyModelConfigSelection(
-    {
-      env: {
-        MODEL: "deepseek-v4-pro",
-        BASE_URL: "https://api.deepseek.com",
-        API_KEY: "sk-test",
-      },
-      thinkingEnabled: false,
-    },
-    {
-      model: "deepseek-v4-pro",
-      thinkingEnabled: false,
-      reasoningEffort: "max",
-    },
-    {
-      model: "deepseek-v4-flash",
-      thinkingEnabled: true,
-      reasoningEffort: "high",
-    }
-  );
-
-  assert.equal(result.changed, true);
-  assert.equal(result.settings.env?.MODEL, "deepseek-v4-pro");
-  assert.equal(result.settings.model, "deepseek-v4-flash");
-  assert.equal(result.settings.thinkingEnabled, true);
-  assert.equal(result.settings.reasoningEffort, "high");
-});
-
-test("applyModelConfigSelection leaves settings untouched when the effective selection is unchanged", () => {
-  const result = applyModelConfigSelection(
-    {
-      env: {
-        MODEL: "deepseek-v4-pro",
-      },
-      thinkingEnabled: true,
-      reasoningEffort: "max",
-    },
-    {
-      model: "deepseek-v4-pro",
-      thinkingEnabled: true,
-      reasoningEffort: "max",
-    },
-    {
-      model: "deepseek-v4-pro",
-      thinkingEnabled: true,
-      reasoningEffort: "max",
-    }
-  );
-
-  assert.equal(result.changed, false);
-  assert.equal(result.settings.model, undefined);
+  assert.equal(resolved.reasoningEffort, "xhigh");
 });
 
 test("formatDurationSeconds preserves sub-second precision and trims trailing zeros", () => {
@@ -256,7 +173,7 @@ test("launchNotifyScript passes DURATION and falls back to /bin/sh for non-execu
       },
       unref() {
         return undefined;
-      },
+      }
     };
   };
 

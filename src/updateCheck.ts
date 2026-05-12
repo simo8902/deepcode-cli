@@ -49,16 +49,14 @@ export async function promptForPendingUpdate(packageInfo: PackageInfo): Promise<
   const choice = await promptUpdateChoice({
     currentVersion: packageInfo.version,
     latestVersion: pending.latestVersion,
-    installCommand,
+    installCommand
   });
 
   if (choice === "install") {
     const ok = await runNpmInstallGlobal(installSpec);
     if (ok) {
       writeUpdateState({ ...state, pending: null });
-      process.stdout.write(
-        `\n${chalk.red("Deep Code has been updated. Please restart the CLI to use the new version.")}\n\n`
-      );
+      process.stdout.write(`\n${chalk.red("Deep Code has been updated. Please restart the CLI to use the new version.")}\n\n`);
     }
     return { installed: ok };
   }
@@ -97,8 +95,8 @@ export async function checkForNpmUpdate(packageInfo: PackageInfo): Promise<void>
         currentVersion: packageInfo.version,
         latestVersion,
         packageName: packageInfo.name,
-        checkedAt: new Date().toISOString(),
-      },
+        checkedAt: new Date().toISOString()
+      }
     });
   } catch {
     // Update checks must never affect CLI startup or normal operation.
@@ -129,7 +127,7 @@ export function getUpdateStatePath(): string {
 async function promptUpdateChoice({
   currentVersion,
   latestVersion,
-  installCommand,
+  installCommand
 }: {
   currentVersion: string;
   latestVersion: string;
@@ -152,7 +150,7 @@ async function promptUpdateChoice({
         currentVersion,
         latestVersion,
         installCommand,
-        onSelect: handleSelect,
+        onSelect: handleSelect
       }),
       { exitOnCtrlC: false }
     );
@@ -161,9 +159,8 @@ async function promptUpdateChoice({
 
 async function runNpmInstallGlobal(installSpec: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn("npm", ["install", "-g", installSpec], {
-      stdio: "inherit",
-      shell: process.platform === "win32",
+    const child = spawn(resolveNpmExecutable(), ["install", "-g", installSpec], {
+      stdio: "inherit"
     });
     child.on("error", (error) => {
       process.stderr.write(`Failed to start npm install: ${error.message}\n`);
@@ -205,9 +202,8 @@ function runNpmViewLatestVersion(
     if (registry) {
       args.push("--registry", registry);
     }
-    const child = spawn("npm", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === "win32",
+    const child = spawn(resolveNpmExecutable(), args, {
+      stdio: ["ignore", "pipe", "pipe"]
     });
 
     let stdout = "";
@@ -241,6 +237,10 @@ function runNpmViewLatestVersion(
   });
 }
 
+function resolveNpmExecutable(): string {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
+}
+
 export function parseNpmViewVersion(output: string): string | null {
   const trimmed = output.trim();
   if (!trimmed) {
@@ -264,10 +264,8 @@ function readUpdateState(): UpdateState {
     return {
       pending: parsed.pending ?? null,
       ignoredVersions: Array.isArray(parsed.ignoredVersions)
-        ? parsed.ignoredVersions.filter(
-            (value): value is string => typeof value === "string" && value.trim().length > 0
-          )
-        : [],
+        ? parsed.ignoredVersions.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : []
     };
   } catch {
     return {};

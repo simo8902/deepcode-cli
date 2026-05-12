@@ -4,22 +4,56 @@ type ThinkingConfig = {
   type: "enabled" | "disabled";
 };
 
+type ProviderOptions = {
+  only?: string[];
+  allow_fallbacks: boolean;
+};
+
 type ThinkingRequestOptions = {
   thinking?: ThinkingConfig;
-  extra_body?: {
-    reasoning_effort?: ReasoningEffort;
+  reasoning_effort?: ReasoningEffort;
+  reasoning?: {
+    effort: ReasoningEffort;
   };
+  provider?: ProviderOptions;
 };
 
 export function buildThinkingRequestOptions(
   thinkingEnabled: boolean,
-  _baseURL?: string,
-  reasoningEffort: ReasoningEffort = "max"
+  baseURL?: string,
+  reasoningEffort: ReasoningEffort = "xhigh",
+  provider?: string,
+  _zdr?: boolean
 ): ThinkingRequestOptions {
-  const thinking: ThinkingConfig = { type: thinkingEnabled ? "enabled" : "disabled" };
+  const providerOptions: ProviderOptions | undefined =
+    provider
+      ? {
+          only: [provider],
+          allow_fallbacks: false
+        }
+      : undefined;
+
+  if (isOpenRouterBaseURL(baseURL)) {
+    return {
+      ...(thinkingEnabled ? { reasoning: { effort: reasoningEffort } } : {}),
+      ...(providerOptions ? { provider: providerOptions } : {})
+    };
+  }
 
   return {
-    thinking,
-    ...(thinkingEnabled ? { extra_body: { reasoning_effort: reasoningEffort } } : {}),
+    thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
+    ...(thinkingEnabled ? { reasoning_effort: reasoningEffort } : {}),
+    ...(providerOptions ? { provider: providerOptions } : {})
   };
+}
+
+function isOpenRouterBaseURL(baseURL: string | undefined): boolean {
+  if (!baseURL) {
+    return false;
+  }
+  try {
+    return new URL(baseURL).hostname.toLowerCase() === "openrouter.ai";
+  } catch {
+    return baseURL.toLowerCase().includes("openrouter.ai");
+  }
 }

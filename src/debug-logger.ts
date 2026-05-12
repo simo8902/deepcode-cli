@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { sanitizeLogPayload } from "./error-logger";
 
 const DEBUG_LOG_FILE = "debug.log";
 
@@ -27,7 +28,7 @@ export function logOpenAIChatCompletionDebug(entry: OpenAIChatCompletionDebugEnt
   try {
     const logPath = getDebugLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.appendFileSync(logPath, `${JSON.stringify(toSerializable(entry))}\n`, "utf8");
+    fs.appendFileSync(logPath, `${JSON.stringify(sanitizeDebugEntry(entry))}\n`, "utf8");
   } catch {
     // Debug logging must never affect CLI behavior.
   }
@@ -42,12 +43,12 @@ export function normalizeDebugError(error: unknown): { name: string; message: st
     return {
       name: error.name,
       message: error.message,
-      stack: error.stack,
+      stack: error.stack
     };
   }
   return {
     name: "UnknownError",
-    message: String(error),
+    message: String(error)
   };
 }
 
@@ -79,4 +80,27 @@ function toSerializable(value: unknown): unknown {
   }
 
   return walk(value);
+}
+
+function sanitizeDebugEntry(entry: OpenAIChatCompletionDebugEntry): unknown {
+  const serializable = toSerializable(entry) as Record<string, unknown>;
+  return {
+    ...serializable,
+    request: sanitizeLogPayload(entry.request),
+    response:
+      entry.response && typeof entry.response === "object"
+        ? sanitizeLogPayload(entry.response as Record<string, unknown>)
+        : entry.response,
+    responseChunks: Array.isArray(entry.responseChunks)
+      ? entry.responseChunks.map((chunk) =>
+          chunk && typeof chunk === "object"
+            ? sanitizeLogPayload(chunk as Record<string, unknown>)
+            : chunk
+        )
+      : entry.responseChunks,
+    error:
+      entry.error && typeof entry.error === "object"
+        ? sanitizeLogPayload(entry.error as Record<string, unknown>)
+        : entry.error
+  };
 }

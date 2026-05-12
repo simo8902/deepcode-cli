@@ -1,6 +1,6 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "model" | "new" | "init" | "resume" | "exit";
+export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "exit";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -15,38 +15,32 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     kind: "skills",
     name: "skills",
     label: "/skills",
-    description: "List available skills",
-  },
-  {
-    kind: "model",
-    name: "model",
-    label: "/model",
-    description: "Select model, thinking mode and thinking effort",
+    description: "List available skills"
   },
   {
     kind: "new",
     name: "new",
     label: "/new",
-    description: "Start a fresh conversation",
+    description: "Start a fresh conversation"
   },
   {
     kind: "init",
     name: "init",
     label: "/init",
-    description: "Initialize an AGENTS.md file with instructions for LLM",
+    description: "Initialize an AGENTS.md file with instructions for LLM"
   },
   {
     kind: "resume",
     name: "resume",
     label: "/resume",
-    description: "Pick a previous conversation to continue",
+    description: "Pick a previous conversation to continue"
   },
   {
     kind: "exit",
     name: "exit",
     label: "/exit",
-    description: "Quit Deep Code CLI",
-  },
+    description: "Quit Deep Code CLI"
+  }
 ];
 
 export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {
@@ -55,12 +49,15 @@ export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {
     name: skill.name,
     label: `/${skill.name}`,
     description: skill.description || "(no description)",
-    skill,
+    skill
   }));
   return [...skillItems, ...BUILTIN_SLASH_COMMANDS];
 }
 
-export function filterSlashCommands(items: SlashCommandItem[], token: string): SlashCommandItem[] {
+export function filterSlashCommands(
+  items: SlashCommandItem[],
+  token: string
+): SlashCommandItem[] {
   if (!token.startsWith("/")) {
     return [];
   }
@@ -71,7 +68,10 @@ export function filterSlashCommands(items: SlashCommandItem[], token: string): S
   return items.filter((item) => item.name.toLowerCase().includes(query));
 }
 
-export function findExactSlashCommand(items: SlashCommandItem[], token: string): SlashCommandItem | null {
+export function findExactSlashCommand(
+  items: SlashCommandItem[],
+  token: string
+): SlashCommandItem | null {
   if (!token.startsWith("/")) {
     return null;
   }

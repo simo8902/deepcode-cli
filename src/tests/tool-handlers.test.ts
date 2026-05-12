@@ -22,7 +22,11 @@ afterEach(() => {
 test("Read returns snippet metadata and Edit can scope replacements by snippet_id", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "sample.txt");
-  fs.writeFileSync(filePath, ["alpha", "target = 1", "omega", "beta", "target = 1", "done"].join("\n"), "utf8");
+  fs.writeFileSync(
+    filePath,
+    ["alpha", "target = 1", "omega", "beta", "target = 1", "done"].join("\n"),
+    "utf8"
+  );
 
   const sessionId = "snippet-scope";
   const readResult = await handleReadTool(
@@ -31,7 +35,9 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
   );
 
   assert.equal(readResult.ok, true);
-  const snippet = (readResult.metadata?.snippet ?? null) as { id: string; startLine: number; endLine: number } | null;
+  const snippet = (readResult.metadata?.snippet ?? null) as
+    | { id: string; startLine: number; endLine: number }
+    | null;
   assert.ok(snippet);
   assert.equal(snippet?.startLine, 4);
   assert.equal(snippet?.endLine, 5);
@@ -40,7 +46,7 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
     {
       snippet_id: snippet?.id,
       old_string: "target = 1",
-      new_string: "target = 2",
+      new_string: "target = 2"
     },
     createContext(sessionId, workspace)
   );
@@ -57,6 +63,44 @@ test("Read returns snippet metadata and Edit can scope replacements by snippet_i
   );
 });
 
+test("Read refuses obvious secret-bearing files by default", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, ".env");
+  fs.writeFileSync(filePath, "JWT_PRIVATE_KEY=secret\n", "utf8");
+
+  const readResult = await handleReadTool(
+    { file_path: filePath },
+    createContext("sensitive-read", workspace)
+  );
+
+  assert.equal(readResult.ok, false);
+  assert.match(readResult.error ?? "", /Refusing to read sensitive file/);
+});
+
+test("Read can explicitly allow sensitive files via environment override", async () => {
+  const workspace = createTempWorkspace();
+  const filePath = path.join(workspace, ".env");
+  fs.writeFileSync(filePath, "JWT_PRIVATE_KEY=secret\n", "utf8");
+  const original = process.env.DEEPCODE_ALLOW_SENSITIVE_READS;
+  process.env.DEEPCODE_ALLOW_SENSITIVE_READS = "true";
+
+  try {
+    const readResult = await handleReadTool(
+      { file_path: filePath },
+      createContext("sensitive-read-override", workspace)
+    );
+
+    assert.equal(readResult.ok, true);
+    assert.match(readResult.output ?? "", /JWT_PRIVATE_KEY=secret/);
+  } finally {
+    if (original === undefined) {
+      delete process.env.DEEPCODE_ALLOW_SENSITIVE_READS;
+    } else {
+      process.env.DEEPCODE_ALLOW_SENSITIVE_READS = original;
+    }
+  }
+});
+
 test("Edit returns candidate match snippets when old_string is not unique", async () => {
   const workspace = createTempWorkspace();
   const filePath = path.join(workspace, "duplicate.txt");
@@ -69,13 +113,16 @@ test("Edit returns candidate match snippets when old_string is not unique", asyn
     {
       file_path: filePath,
       old_string: "city",
-      new_string: "location",
+      new_string: "location"
     },
     createContext(sessionId, workspace)
   );
 
   assert.equal(editResult.ok, false);
-  assert.equal(editResult.error, "old_string is not unique; use snippet_id, replace_all, or provide more context.");
+  assert.equal(
+    editResult.error,
+    "old_string is not unique; use snippet_id, replace_all, or provide more context."
+  );
   const candidates = (editResult.metadata?.candidates ?? []) as Array<{
     snippet_id: string;
     start_line: number;
@@ -102,13 +149,16 @@ test("replace_all requires expected_occurrences for broad short-fragment replace
       file_path: filePath,
       old_string: fragment,
       new_string: "        schema:\n          type: array",
-      replace_all: true,
+      replace_all: true
     },
     createContext(sessionId, workspace)
   );
 
   assert.equal(blockedResult.ok, false);
-  assert.match(blockedResult.error ?? "", /provide expected_occurrences to confirm this broader replacement/);
+  assert.match(
+    blockedResult.error ?? "",
+    /provide expected_occurrences to confirm this broader replacement/
+  );
 
   const allowedResult = await handleEditTool(
     {
@@ -116,7 +166,7 @@ test("replace_all requires expected_occurrences for broad short-fragment replace
       old_string: fragment,
       new_string: "        schema:\n          type: array",
       replace_all: true,
-      expected_occurrences: 3,
+      expected_occurrences: 3
     },
     createContext(sessionId, workspace)
   );
@@ -127,7 +177,7 @@ test("replace_all requires expected_occurrences for broad short-fragment replace
     [
       "        schema:\n          type: array",
       "        schema:\n          type: array",
-      "        schema:\n          type: array",
+      "        schema:\n          type: array"
     ].join("\n---\n")
   );
 });
@@ -144,7 +194,7 @@ test("Edit accepts a unique loose-escape match when only escaping differs", asyn
     {
       file_path: filePath,
       old_string: "params['city_json'] = f'\\\\\"{city}\\\\\"'",
-      new_string: "params['city_json'] = city",
+      new_string: "params['city_json'] = city"
     },
     createContext(sessionId, workspace, {
       createOpenAIClient: () => ({
@@ -159,17 +209,17 @@ test("Edit accepts a unique loose-escape match when only escaping differs", asyn
                         "<response>" +
                         "<corrected_old_string><![CDATA[params['city_json'] = f'\"{city}\"']]></corrected_old_string>" +
                         "<corrected_new_string><![CDATA[params['city_json'] = city]]></corrected_new_string>" +
-                        "</response>",
-                    },
-                  },
-                ],
-              }),
-            },
-          },
+                        "</response>"
+                    }
+                  }
+                ]
+              })
+            }
+          }
         } as any,
         model: "test-model",
-        thinkingEnabled: false,
-      }),
+        thinkingEnabled: false
+      })
     })
   );
 
@@ -187,8 +237,8 @@ test("Write repairs JSON object content for .json files", async () => {
       file_path: filePath,
       content: {
         name: "demo",
-        private: true,
-      } as unknown as string,
+        private: true
+      } as unknown as string
     },
     createContext("write-json-object", workspace)
   );
@@ -200,7 +250,10 @@ test("Write repairs JSON object content for .json files", async () => {
   assert.equal(writeResult.metadata?.line_endings, "LF");
   assert.equal(writeResult.metadata?.input_repaired, true);
   assert.match(String(writeResult.metadata?.diff_preview ?? ""), /\+\s*"name": "demo"|^\+\{/m);
-  assert.equal(fs.readFileSync(filePath, "utf8"), '{\n  "name": "demo",\n  "private": true\n}');
+  assert.equal(
+    fs.readFileSync(filePath, "utf8"),
+    '{\n  "name": "demo",\n  "private": true\n}'
+  );
 });
 
 test("Write updates file state so a follow-up Edit can succeed without another Read", async () => {
@@ -210,7 +263,7 @@ test("Write updates file state so a follow-up Edit can succeed without another R
   const writeResult = await handleWriteTool(
     {
       file_path: filePath,
-      content: "alpha\nbeta\n",
+      content: "alpha\nbeta\n"
     },
     createContext("write-then-edit", workspace)
   );
@@ -223,7 +276,7 @@ test("Write updates file state so a follow-up Edit can succeed without another R
     {
       file_path: filePath,
       old_string: "beta",
-      new_string: "gamma",
+      new_string: "gamma"
     },
     createContext("write-then-edit", workspace)
   );
@@ -246,7 +299,7 @@ test("Write requires a full read before overwriting an existing file", async () 
   const blockedResult = await handleWriteTool(
     {
       file_path: filePath,
-      content: "rewritten",
+      content: "rewritten"
     },
     createContext(sessionId, workspace)
   );
@@ -263,7 +316,7 @@ test("Write can overwrite an existing empty file without a prior read", async ()
   const writeResult = await handleWriteTool(
     {
       file_path: filePath,
-      content: "initialized\n",
+      content: "initialized\n"
     },
     createContext("write-empty-existing", workspace)
   );
@@ -291,7 +344,7 @@ test("Edit rejects stale reads after the file changes on disk", async () => {
     {
       file_path: filePath,
       old_string: "after",
-      new_string: "final",
+      new_string: "final"
     },
     createContext(sessionId, workspace)
   );
@@ -307,7 +360,7 @@ test("Write preserves the exact trailing newline policy from the provided conten
   const writeResult = await handleWriteTool(
     {
       file_path: filePath,
-      content: "no trailing newline",
+      content: "no trailing newline"
     },
     createContext("write-no-newline", workspace)
   );
@@ -329,7 +382,7 @@ test("Edit preserves CRLF line endings for existing files", async () => {
     {
       file_path: filePath,
       old_string: "beta",
-      new_string: "gamma",
+      new_string: "gamma"
     },
     createContext(sessionId, workspace)
   );
@@ -350,7 +403,10 @@ test("Read returns an acknowledgement for images and attaches the image as a fol
     )
   );
 
-  const readResult = await handleReadTool({ file_path: filePath }, createContext("image-read", workspace));
+  const readResult = await handleReadTool(
+    { file_path: filePath },
+    createContext("image-read", workspace)
+  );
 
   assert.equal(readResult.ok, true);
   assert.equal(readResult.output, "File loaded.");
@@ -361,11 +417,15 @@ test("Read returns an acknowledgement for images and attaches the image as a fol
   const followUpMessage = readResult.followUpMessages?.[0];
   assert.equal(followUpMessage?.role, "system");
   assert.match(followUpMessage?.content ?? "", /pixel\.png/);
-  const contentParams = Array.isArray(followUpMessage?.contentParams) ? followUpMessage.contentParams : [];
+  const contentParams = Array.isArray(followUpMessage?.contentParams)
+    ? followUpMessage.contentParams
+    : [];
   assert.equal(contentParams.length, 1);
   assert.equal((contentParams[0] as { type?: unknown }).type, "image_url");
   assert.match(
-    String((contentParams[0] as { image_url?: { url?: unknown } }).image_url?.url ?? ""),
+    String(
+      ((contentParams[0] as { image_url?: { url?: unknown } }).image_url?.url ?? "")
+    ),
     /^data:image\/png;base64,/
   );
 });
@@ -383,10 +443,10 @@ function createContext(
       type: "function",
       function: {
         name: "test",
-        arguments: "{}",
-      },
+        arguments: "{}"
+      }
     },
-    ...overrides,
+    ...overrides
   };
 }
 

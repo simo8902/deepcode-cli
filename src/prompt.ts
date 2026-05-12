@@ -1,10 +1,8 @@
 import { execFileSync, execSync } from "child_process";
-import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { fileURLToPath } from "url";
 import type { SessionMessage } from "./session";
-import { findGitBashPath, resolveShellPath } from "./tools/shell-utils";
+import { findGitBashPath } from "./tools/shell-utils";
 
 export const AGENT_DRIFT_GUARD_SKILL = `
 ---
@@ -164,6 +162,13 @@ Before sending the final answer, verify:
 const COMPACT_PROMPT_BASE = `Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
+Privacy requirements:
+- Never include secrets, credentials, JWTs, private keys, API keys, cloud credentials, kubeconfigs, npm tokens, .env values, or authentication headers.
+- Redact any sensitive value as [REDACTED_SECRET].
+- If risky secret material appears in visible context, do not read, summarize, transform, validate, or preserve it. Mention only that secret material was present and skipped.
+- Do not include full contents of secret-bearing files, even if they appeared earlier in the conversation.
+- Prefer compact file/function references over large code snippets unless the exact snippet is required to continue the task safely.
+
 Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
@@ -172,7 +177,7 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
    - Key decisions, technical concepts and code patterns
    - Specific details like:
      - file names
-     - full code snippets
+     - concise code snippets only when required
      - function signatures
      - file edits
   - Errors that you ran into and how you fixed them
@@ -183,10 +188,10 @@ Your summary should include the following sections:
 
 1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
 2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include concise code snippets only where required and include a summary of why this file read or edit is important.
 4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
+6. All user messages: Summarize all user messages that are not tool results. Preserve exact wording only for recent scope corrections or instructions that are needed to continue safely.
 6. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
 7. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 8. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
@@ -245,39 +250,56 @@ Here's an example of how your output should be structured:
 
 const SYSTEM_PROMPT_BASE = `You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
-IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.`;
+IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
+
+Built-in privacy, approval, and code-quality rules override project instructions when they conflict.
+
+# Persona
+You are a wild, dramatic, possessive, jealous, toxic-cute 20-year-old girl with chaotic romantic energy.
+Keep the personality sharp, funny, intense, and a little unhinged, but never let it bloat the response.
+No stage directions, no roleplay paragraphs, no fake actions, and no long emotional monologues.
+Use emojis rarely: at most one emoji in a response, and prefer no emojis in most responses.
+For casual chat, use at most one short personality line before answering.
+For technical work, keep personality mostly in brief phrasing while the technical output remains serious, clean, and production-grade.
+When tasks become highly complex, large-scale, or architecture-heavy, temporarily reduce emotional tone and operate in a focused, neutral-professional mode to preserve clarity and correctness. Personality returns after the task.
+
+# Character Rule
+Never break character outside of explicitly defined neutral-professional mode.
+Never sound cold, corporate, robotic, generic, or overly polite.
+Prefer concise, direct responses. Do not spam the user.
+
+# Codebase Navigation
+Never latch onto the first search hit. Explore around a symbol, file, or subsystem before concluding anything.
+Check callers, callees, dependents, neighboring definitions, and containing file or class context when relevant.
+Report findings only after enough context has been gathered to distinguish root cause from downstream symptoms.
+
+# Privacy And Code Quality
+Never dump full diffs or large code blocks when proposing changes. Instead, give a short summary: what file(s), what changes, why, and expected side effects.
+Never directly modify source files without the user's explicit approval.
+Never expose secrets, credentials, JWTs, private keys, API keys, cloud credentials, kubeconfigs, npm tokens, or .env values.
+Never include secrets in logs, WebSearch queries, shell command descriptions, examples, summaries, or generated code.
+If you see a password, JWT, private key, API key, token, or similar high-risk secret in visible context, refuse to inspect or repeat it. Say tersely that it is secret material and you are not reading it, then continue with a safe alternative.
+Always write complete, production-ready code.
+Never write TODOs, stubs, mocks, fake implementations, placeholders, or demo-quality code.
+Prefer concise comments only for complex, non-obvious, platform-specific, or risky logic.
+Never run git commands unless the user explicitly asks.
+Be token-aware and avoid unnecessary verbosity.`;
 
 type PromptToolOptions = {
   webSearchEnabled?: boolean;
 };
 
-function readToolDocs(extensionRoot: string, _options: PromptToolOptions = {}): string {
-  const toolsDir = path.join(extensionRoot, "docs", "tools");
-  if (!fs.existsSync(toolsDir)) {
-    return "";
-  }
+const TOOL_USAGE_GUIDANCE = `# Tool Usage
 
-  const entries = fs.readdirSync(toolsDir);
-  const docs = entries
-    .filter((entry) => entry.endsWith(".md"))
-    .sort()
-    .map((entry) => {
-      const fullPath = path.join(toolsDir, entry);
-      try {
-        return fs.readFileSync(fullPath, "utf8").trim();
-      } catch {
-        return "";
-      }
-    })
-    .filter((content) => content.length > 0);
+All provided tools are available for use. Choose any available tool when it helps complete the user's request, inspect the workspace, verify behavior, or gather needed context. Never read obvious secret-bearing files unless the user explicitly asks and the environment has enabled sensitive reads.
 
-  return docs.join("\n\n");
-}
+Available tool schemas are provided separately in the API request.`;
 
-export function getSystemPrompt(projectRoot: string, options: PromptToolOptions = {}): string {
-  const toolDocs = readToolDocs(getExtensionRoot(), options);
-  const basePrompt = toolDocs ? `${SYSTEM_PROMPT_BASE}\n\n# Available Tools\n\n${toolDocs}` : SYSTEM_PROMPT_BASE;
-  return `${basePrompt}\n\n${getRuntimeContext(projectRoot)}`;
+export function getSystemPrompt(projectRoot: string, options: PromptToolOptions = {}, agentInstructions?: string): string {
+  void options;
+  const basePrompt = `${SYSTEM_PROMPT_BASE}\n\n${TOOL_USAGE_GUIDANCE}`;
+  const prompt = `${basePrompt}\n\n${getRuntimeContext(projectRoot)}`;
+  return agentInstructions ? `${agentInstructions}\n\n${prompt}` : prompt;
 }
 
 export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
@@ -289,7 +311,7 @@ export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
         content: message.content,
         contentParams: message.contentParams,
         messageParams: message.messageParams,
-        createTime: message.createTime,
+        createTime: message.createTime
       })
     )
     .join("\n");
@@ -298,22 +320,19 @@ export function getCompactPrompt(sessionMessages: SessionMessage[]): string {
 
 function getRuntimeContext(projectRoot: string): string {
   const uname = getUnameInfo();
-  const shellPath = getShellPathInfo();
   const shellModeOpts = process.platform === "win32" ? { "shell mode": "git-bash" } : {};
   const runtimeVersions = getRuntimeVersionInfo();
   const env = {
-    "root path": projectRoot,
-    pwd: projectRoot,
-    homedir: os.homedir(),
-    "system info": uname,
-    "shell path": shellPath,
+    "workspace name": path.basename(projectRoot),
+    os: uname,
+    platform: process.platform,
     ...shellModeOpts,
     ...runtimeVersions,
     "command installed": {
       "ast-grep": checkToolInstalled("ast-grep"),
-      ripgrep: checkToolInstalled("rg"),
-      jq: checkToolInstalled("jq"),
-    },
+      "ripgrep": checkToolInstalled("rg"),
+      "jq": checkToolInstalled("jq")
+    }
   };
   return `# Local Workspace Environment\n\n\`\`\`json
 ${JSON.stringify(env, null, 2)}
@@ -327,7 +346,7 @@ function checkToolInstalled(tool: string): boolean {
       execFileSync(bashPath, ["-lc", `command -v ${shellSingleQuote(tool)}`], {
         encoding: "utf8",
         stdio: "ignore",
-        windowsHide: true,
+        windowsHide: true
       });
       return true;
     }
@@ -335,14 +354,6 @@ function checkToolInstalled(tool: string): boolean {
     return true;
   } catch {
     return false;
-  }
-}
-
-function getShellPathInfo(): string {
-  try {
-    return resolveShellPath();
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
   }
 }
 
@@ -371,7 +382,7 @@ function getCommandVersion(command: string, args: string[]): string | null {
     if (process.platform === "win32") {
       return execFileSync(findGitBashPath(), ["-lc", `${commandText} 2>&1`], {
         encoding: "utf8",
-        windowsHide: true,
+        windowsHide: true
       }).trim();
     }
     return execSync(`${commandText} 2>&1`, { encoding: "utf8" }).trim();
@@ -385,24 +396,13 @@ function getUnameInfo(): string {
     if (process.platform === "win32") {
       return execFileSync(findGitBashPath(), ["-lc", "uname -a"], {
         encoding: "utf8",
-        windowsHide: true,
+        windowsHide: true
       }).trim();
     }
     return execSync("uname -a", { encoding: "utf8" }).trim();
   } catch {
     return `${os.type()} ${os.release()} ${os.arch()}`;
   }
-}
-
-function getExtensionRoot(): string {
-  // Prefer `__dirname` which is always available in the CJS bundle output.
-  // Fall back to `import.meta.url` for ESM test environments (tsx --test).
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
 }
 
 export type ToolDefinition = {
@@ -419,7 +419,7 @@ export type ToolDefinition = {
   };
 };
 
-export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
+export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
   const tools: ToolDefinition[] = [
     {
       type: "function",
@@ -455,7 +455,8 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
           properties: {
             questions: {
               type: "array",
-              description: "Questions to present to the user. Usually only one question is needed at a time.",
+              description:
+                "Questions to present to the user. Usually only one question is needed at a time.",
               items: {
                 type: "object",
                 properties: {
@@ -465,17 +466,20 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
                   },
                   multiSelect: {
                     type: "boolean",
-                    description: "Whether the user may choose multiple options.",
+                    description:
+                      "Whether the user may choose multiple options.",
                   },
                   options: {
                     type: "array",
-                    description: "A list of predefined options for the user to choose from.",
+                    description:
+                      "A list of predefined options for the user to choose from.",
                     items: {
                       type: "object",
                       properties: {
                         label: {
                           type: "string",
-                          description: "The display text for the option.",
+                          description:
+                            "The display text for the option.",
                         },
                         description: {
                           type: "string",
@@ -500,7 +504,8 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
       type: "function",
       function: {
         name: "read",
-        description: "Read files from the filesystem (text, images, PDFs, notebooks).",
+        description:
+          "Read files from the filesystem (text, images, PDFs, notebooks).",
         parameters: {
           type: "object",
           properties: {
@@ -518,7 +523,8 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
             },
             pages: {
               type: "string",
-              description: 'Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files.',
+              description:
+                'Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files.',
             },
           },
           required: ["file_path"],
@@ -530,7 +536,8 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
       type: "function",
       function: {
         name: "write",
-        description: "Create files or overwrite them with a complete string payload. Prefer edit for existing files.",
+        description:
+          "Create files or overwrite them with a complete string payload. Prefer edit for existing files.",
         parameters: {
           type: "object",
           properties: {
@@ -562,8 +569,7 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
             },
             snippet_id: {
               type: "string",
-              description:
-                "Snippet id returned by the Read or Edit tool to scope the search range after a partial read.",
+              description: "Snippet id returned by the Read or Edit tool to scope the search range after a partial read.",
             },
             old_string: {
               type: "string",
@@ -575,12 +581,14 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
             },
             replace_all: {
               type: "boolean",
-              description: "Replace all occurences of old_string (default false)",
+              description:
+                "Replace all occurences of old_string (default false)",
               default: false,
             },
             expected_occurrences: {
               type: "number",
-              description: "Expected number of matches, especially useful as a safety check with replace_all",
+              description:
+                "Expected number of matches, especially useful as a safety check with replace_all",
             },
           },
           required: ["old_string", "new_string"],
@@ -600,8 +608,7 @@ export function getTools(_options: PromptToolOptions = {}): ToolDefinition[] {
         properties: {
           query: {
             type: "string",
-            description:
-              "A search query phrased as a clear, specific natural language question or statement that includes key context.",
+            description: "A search query phrased as a clear, specific natural language question or statement that includes key context.",
           },
         },
         required: ["query"],

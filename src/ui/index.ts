@@ -1,11 +1,4 @@
-export {
-  App,
-  readSettings,
-  writeSettings,
-  writeModelConfigSelection,
-  resolveCurrentSettings,
-  createOpenAIClient,
-} from "./App";
+export { App, readSettings, resolveCurrentSettings, createOpenAIClient } from "./App";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 export { MessageView, parseDiffPreview } from "./MessageView";
 export {
@@ -19,14 +12,10 @@ export {
   removeCurrentSlashToken,
   isClearImageAttachmentsShortcut,
   renderBufferWithCursor,
-  buildInitPromptSubmission,
-  getThinkingOptionIndex,
-  MODEL_COMMAND_MODELS,
-  MODEL_COMMAND_THINKING_OPTIONS,
   useTerminalInput,
   parseTerminalInput,
   type PromptSubmission,
-  type InputKey,
+  type InputKey
 } from "./PromptInput";
 export { getPromptCursorPlacement } from "./prompt/cursor";
 export { SessionList, formatSessionTitle } from "./SessionList";
@@ -40,7 +29,7 @@ export {
   type AskUserQuestionOption,
   type AskUserQuestionItem,
   type PendingAskUserQuestion,
-  type AskUserQuestionAnswers,
+  type AskUserQuestionAnswers
 } from "./askUserQuestion";
 export { readClipboardImage, type ClipboardImage } from "./clipboard";
 export { buildLoadingText, type LoadingTextInput } from "./loadingText";
@@ -60,11 +49,10 @@ export {
   moveLineEnd,
   killLine,
   deleteWordBefore,
-  deleteWordAfter,
   reset,
   isEmpty,
   getCurrentSlashToken,
-  type PromptBufferState,
+  type PromptBufferState
 } from "./promptBuffer";
 export {
   BUILTIN_SLASH_COMMANDS,
@@ -74,7 +62,7 @@ export {
   formatSlashCommandDescription,
   formatSlashCommandLabel,
   type SlashCommandKind,
-  type SlashCommandItem,
+  type SlashCommandItem
 } from "./slashCommands";
 export { findExpandedThinkingId } from "./thinkingState";
 export { buildExitSummaryText } from "./exitSummary";

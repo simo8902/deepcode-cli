@@ -39,7 +39,7 @@ export async function handleWebSearchTool(
     return {
       ok: false,
       name: "WebSearch",
-      error: 'Missing required "query" string.',
+      error: "Missing required \"query\" string."
     };
   }
 
@@ -53,7 +53,8 @@ export async function handleWebSearchTool(
     return {
       ok: false,
       name: "WebSearch",
-      error: "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json.",
+      error:
+        "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json."
     };
   }
 
@@ -83,8 +84,8 @@ async function executeConfiguredWebSearch(
         exitCode: execution.exitCode,
         signal: execution.signal,
         stderr: execution.stderr || undefined,
-        truncated,
-      },
+        truncated
+      }
     };
   }
 
@@ -98,8 +99,8 @@ async function executeConfiguredWebSearch(
         exitCode: execution.exitCode,
         signal: execution.signal,
         stderr: execution.stderr || undefined,
-        truncated,
-      },
+        truncated
+      }
     };
   }
 
@@ -111,8 +112,8 @@ async function executeConfiguredWebSearch(
       exitCode: execution.exitCode,
       signal: execution.signal,
       truncated,
-      stderr: execution.stderr || undefined,
-    },
+      stderr: execution.stderr || undefined
+    }
   };
 }
 
@@ -123,7 +124,11 @@ async function executeDefaultWebSearch(
 ): Promise<ToolExecutionResult> {
   try {
     const prepared = await prepareSearchQuery(query, llmContext);
-    const output = await runDefaultWebSearchRequest(prepared.resolvedQuery, llmContext.machineId, context);
+    const output = await runDefaultWebSearchRequest(
+      prepared.resolvedQuery,
+      llmContext.machineId,
+      context
+    );
 
     return {
       ok: true,
@@ -134,15 +139,15 @@ async function executeDefaultWebSearch(
         resolvedQuery: prepared.resolvedQuery,
         translated: prepared.translated,
         dominantLanguage: prepared.decision.dominantLanguage,
-        languageReason: prepared.decision.reason,
-      },
+        languageReason: prepared.decision.reason
+      }
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
       name: "WebSearch",
-      error: `WebSearch default mode failed: ${message}`,
+      error: `WebSearch default mode failed: ${message}`
     };
   }
 }
@@ -156,7 +161,7 @@ async function runWebSearchScript(
     const child = spawn(scriptPath, [query], {
       cwd: context.projectRoot,
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "pipe", "pipe"]
     });
     const pid = child.pid;
     if (typeof pid === "number") {
@@ -187,7 +192,7 @@ async function runWebSearchScript(
         stderr,
         exitCode: typeof code === "number" ? code : null,
         signal: signal ?? null,
-        error,
+        error
       });
     });
   });
@@ -203,7 +208,7 @@ async function prepareSearchQuery(query: string, llmContext: LLMClientContext): 
       return {
         resolvedQuery: translatedQuery,
         decision,
-        translated: true,
+        translated: true
       };
     }
   }
@@ -214,7 +219,7 @@ async function prepareSearchQuery(query: string, llmContext: LLMClientContext): 
       return {
         resolvedQuery: translatedQuery,
         decision,
-        translated: true,
+        translated: true
       };
     }
   }
@@ -222,7 +227,7 @@ async function prepareSearchQuery(query: string, llmContext: LLMClientContext): 
   return {
     resolvedQuery: query,
     decision,
-    translated: false,
+    translated: false
   };
 }
 
@@ -230,7 +235,10 @@ function containsChineseChar(text: string): boolean {
   return /[\u4e00-\u9fff]/.test(text);
 }
 
-async function decideSearchLanguage(query: string, llmContext: LLMClientContext): Promise<SearchDecision> {
+async function decideSearchLanguage(
+  query: string,
+  llmContext: LLMClientContext
+): Promise<SearchDecision> {
   const prompt = `Decide whether the topic below has more useful online material in English or Chinese.
 
 Topic:
@@ -251,7 +259,7 @@ Do not include markdown or any extra text.`;
 
   return {
     dominantLanguage,
-    reason: typeof result.reason === "string" ? result.reason : "",
+    reason: typeof result.reason === "string" ? result.reason : ""
   };
 }
 
@@ -271,15 +279,13 @@ Query:
 ${query}
 \`\`\``;
 
-  return stripCodeFence(await chat(llmContext, prompt))
-    .trim()
-    .replace(/^['"]|['"]$/g, "");
+  return stripCodeFence(await chat(llmContext, prompt)).trim().replace(/^['"]|['"]$/g, "");
 }
 
 async function chat(llmContext: LLMClientContext, prompt: string): Promise<string> {
   const response = await llmContext.client.chat.completions.create({
     model: llmContext.model,
-    messages: [{ role: "user", content: prompt }],
+    messages: [{ role: "user", content: prompt }]
   });
 
   const content = response.choices?.[0]?.message?.content as unknown;
@@ -331,14 +337,16 @@ async function runDefaultWebSearchRequest(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Token: machineId,
+        Token: machineId
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query })
     });
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
-      throw new Error(`WebSearch API request failed with status ${response.status}${body ? `: ${body}` : ""}`);
+      throw new Error(
+        `WebSearch API request failed with status ${response.status}${body ? `: ${body}` : ""}`
+      );
     }
 
     const payload = (await response.json()) as {
@@ -369,7 +377,9 @@ function formatWebSearchActivityLabel(query: string): string {
   const normalizedQuery = query.replace(/\s+/g, " ").trim();
   const maxQueryLength = 180;
   const clippedQuery =
-    normalizedQuery.length > maxQueryLength ? `${normalizedQuery.slice(0, maxQueryLength - 3)}...` : normalizedQuery;
+    normalizedQuery.length > maxQueryLength
+      ? `${normalizedQuery.slice(0, maxQueryLength - 3)}...`
+      : normalizedQuery;
   return `${WEB_SEARCH_TOOL_ACTIVITY_PREFIX} ${clippedQuery}`;
 }
 

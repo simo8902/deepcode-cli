@@ -123,25 +123,7 @@ export function deleteWordBefore(state: PromptBufferState): PromptBufferState {
   }
   return {
     text: state.text.slice(0, start) + state.text.slice(end),
-    cursor: start,
-  };
-}
-
-export function deleteWordAfter(state: PromptBufferState): PromptBufferState {
-  const start = state.cursor;
-  let end = start;
-  while (end < state.text.length && /\s/.test(state.text[end] ?? "")) {
-    end++;
-  }
-  while (end < state.text.length && !/\s/.test(state.text[end] ?? "")) {
-    end++;
-  }
-  if (start === end) {
-    return state;
-  }
-  return {
-    text: state.text.slice(0, start) + state.text.slice(end),
-    cursor: start,
+    cursor: start
   };
 }
 
@@ -187,6 +169,6 @@ function locate(state: PromptBufferState): {
     line: lineNumber,
     column: state.cursor - lineStart,
     lineStart,
-    lineEnd,
+    lineEnd
   };
 }

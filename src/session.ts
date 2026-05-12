@@ -2,9 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { createRequire } from "module";
 import { fileURLToPath } from "url";
 import matter from "gray-matter";
-import ejs from "ejs";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./notify";
 import { buildThinkingRequestOptions } from "./openai-thinking";
@@ -13,11 +13,22 @@ import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL } 
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { logApiError } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
+import {
+  assertNoHighRiskSecretsForModel,
+  sanitizeForModelPipeline,
+  sanitizeToolCallsForReplay
+} from "./privacy-guard";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
+const FINAL_HTTP_BODY_LOG_ENV = "DEEPCODE_LOG_FINAL_HTTP_BODY";
+const FINAL_HTTP_BODY_LOG_PATH = path.join(os.homedir(), ".deepcode", "logs", "final-http-body.jsonl");
+const require = createRequire(import.meta.url);
+const ejs = require("ejs") as {
+  render: (template: string, data?: Record<string, unknown>) => string;
+};
 
 type ChatCompletionDebugOptions = {
   enabled?: boolean;
@@ -42,7 +53,9 @@ function summarizeCompletionOptions(options?: Record<string, unknown>): Record<s
   }
   return {
     ...options,
-    signal: options.signal instanceof AbortSignal ? { aborted: options.signal.aborted } : options.signal,
+    signal: options.signal instanceof AbortSignal
+      ? { aborted: options.signal.aborted }
+      : options.signal
   };
 }
 
@@ -87,7 +100,13 @@ function getTotalTokens(usage: unknown | null | undefined): number {
   return typeof totalTokens === "number" ? totalTokens : 0;
 }
 
-export type SessionStatus = "failed" | "pending" | "processing" | "waiting_for_user" | "completed" | "interrupted";
+export type SessionStatus =
+  | "failed"
+  | "pending"
+  | "processing"
+  | "waiting_for_user"
+  | "completed"
+  | "interrupted";
 
 export type SessionEntry = {
   id: string;
@@ -102,7 +121,7 @@ export type SessionEntry = {
   activeTokens: number;
   createTime: string;
   updateTime: string;
-  processes: Map<string, { startTime: string; command: string }> | null; // {pid: {startTime, command}}
+  processes: Map<string, { startTime: string; command: string }> | null;  // {pid: {startTime, command}}
 };
 
 export type SessionsIndex = {
@@ -233,7 +252,7 @@ export class SessionManager {
       startedAt,
       estimatedTokens: Math.round(estimatedTokens),
       formattedTokens: this.formatEstimatedTokens(estimatedTokens),
-      phase,
+      phase
     });
   }
 
@@ -276,18 +295,20 @@ export class SessionManager {
       stream: true,
       stream_options: {
         ...(isUsageRecord(request.stream_options) ? request.stream_options : {}),
-        include_usage: true,
-      },
+        include_usage: true
+      }
     };
 
     let response: unknown;
+    let outboundRequest: Record<string, unknown> = streamRequest;
     try {
-      response = await (
-        client.chat.completions.create as unknown as (
-          body: Record<string, unknown>,
-          options?: Record<string, unknown>
-        ) => Promise<unknown>
-      )(streamRequest, options);
+      assertNoHighRiskSecretsForModel(streamRequest);
+      outboundRequest = sanitizeForModelPipeline(streamRequest).value as Record<string, unknown>;
+      this.logFinalHttpBody(requestId, sessionId, outboundRequest);
+      response = await (client.chat.completions.create as unknown as (
+        body: Record<string, unknown>,
+        options?: Record<string, unknown>
+      ) => Promise<unknown>)(outboundRequest, options);
     } catch (error) {
       this.logChatCompletionDebug(debug, {
         timestamp: new Date().toISOString(),
@@ -298,8 +319,8 @@ export class SessionManager {
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
         params: { ...debug?.params, options: summarizeCompletionOptions(options) },
-        request: streamRequest,
-        error: normalizeDebugError(error),
+        request: outboundRequest,
+        error: normalizeDebugError(error)
       });
       logApiError({
         timestamp: new Date().toISOString(),
@@ -310,9 +331,9 @@ export class SessionManager {
         error: {
           name: error instanceof Error ? error.name : "UnknownError",
           message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+          stack: error instanceof Error ? error.stack : undefined
         },
-        request: streamRequest,
+        request: outboundRequest
       });
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
       throw error;
@@ -329,8 +350,8 @@ export class SessionManager {
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
         params: { ...debug?.params, options: summarizeCompletionOptions(options) },
-        request: streamRequest,
-        response,
+        request: outboundRequest,
+        response
       });
       return response as { choices?: Array<{ message?: Record<string, unknown> }>; usage?: unknown };
     }
@@ -340,14 +361,11 @@ export class SessionManager {
     let refusal: string | null = null;
     let usage: unknown = null;
     const responseChunks: unknown[] = [];
-    const toolCallsByIndex = new Map<
-      number,
-      {
-        id?: string;
-        type?: string;
-        function?: { name?: string; arguments?: string };
-      }
-    >();
+    const toolCallsByIndex = new Map<number, {
+      id?: string;
+      type?: string;
+      function?: { name?: string; arguments?: string };
+    }>();
 
     const trackText = (value: unknown) => {
       if (typeof value !== "string" || value.length === 0) {
@@ -431,9 +449,9 @@ export class SessionManager {
         baseURL: debug?.baseURL,
         durationMs: Date.now() - startedAtMs,
         params: { ...debug?.params, options: summarizeCompletionOptions(options) },
-        request: streamRequest,
+        request: outboundRequest,
         responseChunks,
-        error: normalizeDebugError(error),
+        error: normalizeDebugError(error)
       });
       logApiError({
         timestamp: new Date().toISOString(),
@@ -444,9 +462,9 @@ export class SessionManager {
         error: {
           name: error instanceof Error ? error.name : "UnknownError",
           message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
+          stack: error instanceof Error ? error.stack : undefined
         },
-        request: streamRequest,
+        request: outboundRequest
       });
       throw error;
     } finally {
@@ -469,7 +487,7 @@ export class SessionManager {
 
     const finalResponse = {
       choices: [{ message }],
-      usage,
+      usage
     };
     this.logChatCompletionDebug(debug, {
       timestamp: new Date().toISOString(),
@@ -480,9 +498,9 @@ export class SessionManager {
       baseURL: debug?.baseURL,
       durationMs: Date.now() - startedAtMs,
       params: { ...debug?.params, options: summarizeCompletionOptions(options) },
-      request: streamRequest,
+      request: outboundRequest,
       responseChunks,
-      response: finalResponse,
+      response: finalResponse
     });
     return finalResponse;
   }
@@ -495,6 +513,33 @@ export class SessionManager {
       return;
     }
     logOpenAIChatCompletionDebug(entry);
+  }
+
+  private logFinalHttpBody(
+    requestId: string,
+    sessionId: string | undefined,
+    body: Record<string, unknown>
+  ): void {
+    if (process.env[FINAL_HTTP_BODY_LOG_ENV] !== "true") {
+      return;
+    }
+
+    try {
+      fs.mkdirSync(path.dirname(FINAL_HTTP_BODY_LOG_PATH), { recursive: true });
+      fs.appendFileSync(
+        FINAL_HTTP_BODY_LOG_PATH,
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          requestId,
+          sessionId,
+          boundary: "before client.chat.completions.create",
+          body
+        }) + "\n",
+        "utf8"
+      );
+    } catch {
+      // Boundary logging must never affect the request path.
+    }
   }
 
   async identifyMatchingSkillNames(
@@ -512,43 +557,35 @@ Response in JSON format:
 \`\`\`\n
 If none of the available skills match, respond with an empty array, i.e. \`{"skillNames": []}\`.\n
 The candidate skills are as follows:\n\n`;
-    const simpleSkills = skills
-      .filter((x) => !x.isLoaded)
-      .map((x) => {
-        return { name: x.name, description: x.description };
-      });
+    const simpleSkills = skills.filter((x) => !x.isLoaded).map((x) => {
+      return {name: x.name, description: x.description};
+    })
     if (simpleSkills.length === 0) {
       return [];
     }
     systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
-
+    
     const { client, model, baseURL, debugLogEnabled } = this.createOpenAIClient();
     if (!client) {
       return [];
     }
 
     try {
-      const response = await this.createChatCompletionStream(
-        client,
-        {
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
-          response_format: { type: "json_object" },
-        },
-        options?.signal ? { signal: options.signal } : undefined,
-        options?.sessionId,
-        {
-          enabled: debugLogEnabled,
-          location: "SessionManager.identifyMatchingSkillNames",
-          baseURL,
-          params: { purpose: "skill-matching" },
-        }
-      );
+      const response = await this.createChatCompletionStream(client, {
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        response_format: { type: "json_object" }
+      }, options?.signal ? { signal: options.signal } : undefined, options?.sessionId, {
+        enabled: debugLogEnabled,
+        location: "SessionManager.identifyMatchingSkillNames",
+        baseURL,
+        params: { purpose: "skill-matching" }
+      });
       this.throwIfAborted(options?.signal);
-
+      
       const rawContent = response.choices?.[0]?.message?.content;
       const content = typeof rawContent === "string" ? rawContent : "";
       if (!content) {
@@ -559,7 +596,7 @@ The candidate skills are as follows:\n\n`;
       if (parsed && Array.isArray(parsed.skillNames)) {
         return parsed.skillNames;
       }
-
+      
       return [];
     } catch (error) {
       if (this.isAbortLikeError(error) || options?.signal?.aborted) {
@@ -623,7 +660,10 @@ The candidate skills are as follows:\n\n`;
     if (sessionId) {
       const loadedSkillKeys = this.getLoadedSkillKeys(sessionId);
       for (const skill of skillsByName.values()) {
-        if (loadedSkillKeys.has(this.getSkillKey(skill)) || loadedSkillKeys.has(this.getSkillKeyByName(skill.name))) {
+        if (
+          loadedSkillKeys.has(this.getSkillKey(skill))
+          || loadedSkillKeys.has(this.getSkillKeyByName(skill.name))
+        ) {
           skill.isLoaded = true;
         }
       }
@@ -667,7 +707,10 @@ The candidate skills are as follows:\n\n`;
             ? parsed.data.name.trim()
             : fallbackSkill.name,
         path: displayPath,
-        description: typeof parsed.data.description === "string" ? parsed.data.description.trim() : "",
+        description:
+          typeof parsed.data.description === "string"
+            ? parsed.data.description.trim()
+            : "",
       };
     } catch {
       return fallbackSkill;
@@ -732,8 +775,8 @@ The candidate skills are as follows:\n\n`;
 
     return dedupedSkills.map((skill) => {
       const matchedSkill =
-        availableSkillsByKey.get(this.getSkillKey(skill)) ??
-        availableSkillsByKey.get(this.getSkillKeyByName(skill.name));
+        availableSkillsByKey.get(this.getSkillKey(skill))
+        ?? availableSkillsByKey.get(this.getSkillKeyByName(skill.name));
       if (!matchedSkill) {
         return skill;
       }
@@ -779,6 +822,7 @@ The candidate skills are as follows:\n\n`;
     this.reportNewPrompt();
     const signal = controller?.signal;
     this.throwIfAborted(signal);
+    this.applyInitCommandPrompt(userPrompt);
 
     if (userPrompt.text) {
       const skills = await this.listSkills();
@@ -810,17 +854,19 @@ The candidate skills are as follows:\n\n`;
       activeTokens: 0,
       createTime: now,
       updateTime: now,
-      processes: null,
+      processes: null
     };
     index.entries.push(entry);
-    const sortedEntries = index.entries.slice().sort((a, b) => {
-      const aTime = Date.parse(a.updateTime);
-      const bTime = Date.parse(b.updateTime);
-      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
-        return b.updateTime.localeCompare(a.updateTime);
-      }
-      return bTime - aTime;
-    });
+    const sortedEntries = index.entries
+      .slice()
+      .sort((a, b) => {
+        const aTime = Date.parse(a.updateTime);
+        const bTime = Date.parse(b.updateTime);
+        if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+          return b.updateTime.localeCompare(a.updateTime);
+        }
+        return bTime - aTime;
+      });
     const keptEntries = sortedEntries.slice(0, MAX_SESSION_ENTRIES);
     const keptIds = new Set(keptEntries.map((item) => item.id));
     const droppedEntries = sortedEntries.filter((item) => !keptIds.has(item.id));
@@ -828,19 +874,22 @@ The candidate skills are as follows:\n\n`;
     this.saveSessionsIndex(index);
     this.removeSessionMessages(droppedEntries.map((item) => item.id));
 
+    const agentInstructions = this.loadAgentInstructions();
     const systemPrompt = getSystemPrompt(this.projectRoot, this.getPromptToolOptions());
     const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
     this.appendSessionMessage(sessionId, systemMessage);
 
-    const agentInstructions = this.loadAgentInstructions();
-    if (agentInstructions) {
-      const instructionsMessage = this.buildSystemMessage(sessionId, agentInstructions);
-      this.appendSessionMessage(sessionId, instructionsMessage);
-    }
-
     const defaultSkillPrompt = `Use the skill document below to assist the user:\n<agent-drift-guard-skill>${AGENT_DRIFT_GUARD_SKILL}</agent-drift-guard-skill>`;
     const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
     this.appendSessionMessage(sessionId, defaultSkillMessage);
+
+    if (agentInstructions) {
+      const agentInstructionsMessage = this.buildSystemMessage(
+        sessionId,
+        this.renderForcedAgentInstructions(agentInstructions)
+      );
+      this.appendSessionMessage(sessionId, agentInstructionsMessage);
+    }
 
     const userMessage = this.buildUserMessage(sessionId, userPrompt);
     this.appendSessionMessage(sessionId, userMessage);
@@ -869,12 +918,13 @@ ${skillMd}
   async replySession(sessionId: string, userPrompt: UserPromptContent, controller?: AbortController): Promise<void> {
     const signal = controller?.signal;
     this.throwIfAborted(signal);
+    this.applyInitCommandPrompt(userPrompt);
     const now = new Date().toISOString();
     const updated = this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       status: "pending",
       failReason: null,
-      updateTime: now,
+      updateTime: now
     }));
 
     if (!updated) {
@@ -923,8 +973,7 @@ ${skillMd}
 
   async activateSession(sessionId: string, controller?: AbortController): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify } =
-      this.createOpenAIClient();
+    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, provider, zdr } = this.createOpenAIClient();
     const now = new Date().toISOString();
 
     if (!client) {
@@ -932,15 +981,11 @@ ${skillMd}
         ...entry,
         status: "failed",
         failReason: "OpenAI API key not found",
-        updateTime: now,
+        updateTime: now
       }));
       this.onAssistantMessage(
-        this.buildAssistantMessage(
-          sessionId,
-          "OpenAI API key not found. Please configure ~/.deepcode/settings.json.",
-          null
-        ),
-        false
+        this.buildAssistantMessage(sessionId, "OpenAI API key not found. Please configure ~/.deepcode/settings.json.", null),
+        false,
       );
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
       return;
@@ -952,7 +997,7 @@ ${skillMd}
         ...entry,
         status: "interrupted",
         failReason: "interrupted",
-        updateTime: now,
+        updateTime: now
       }));
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
       return;
@@ -961,13 +1006,13 @@ ${skillMd}
     this.updateSessionEntry(sessionId, (entry) => ({
       ...entry,
       status: "processing",
-      updateTime: now,
+      updateTime: now
     }));
 
     this.sessionControllers.set(sessionId, sessionController);
 
     try {
-      const maxIterations = 80000; // about 1K RMB cost
+      const maxIterations = 80000;  // about 1K RMB cost
       let toolCalls: unknown[] | null = null;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -982,25 +1027,21 @@ ${skillMd}
 
         const compactPromptTokenThreshold = getCompactPromptTokenThreshold(model);
         if (session.activeTokens > compactPromptTokenThreshold) {
-          const message = this.buildAssistantMessage(
-            sessionId,
-            "The conversation is getting long, compacting...",
-            null
-          );
+          const message = this.buildAssistantMessage(sessionId, "The conversation is getting long, compacting...", null);
           message.meta = { asThinking: true };
           this.onAssistantMessage(message, false);
           await this.compactSession(sessionId, sessionController.signal);
         }
 
         const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled);
-        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
+        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr);
         const response = await this.createChatCompletionStream(
           client,
           {
             model,
             messages,
             tools: getTools(this.getPromptToolOptions()),
-            ...thinkingOptions,
+            ...thinkingOptions
           },
           { signal: sessionController.signal },
           sessionId,
@@ -1008,7 +1049,7 @@ ${skillMd}
             enabled: debugLogEnabled,
             location: "SessionManager.activateSession",
             baseURL,
-            params: { iteration, thinkingEnabled, reasoningEffort },
+            params: { iteration, thinkingEnabled, reasoningEffort }
           }
         );
 
@@ -1048,9 +1089,15 @@ ${skillMd}
           toolCalls,
           usage: accumulateUsage(entry.usage, responseUsage),
           activeTokens: getTotalTokens(responseUsage),
-          status: refusal ? "failed" : waitingForUser ? "waiting_for_user" : toolCalls ? "processing" : "completed",
+          status: refusal
+            ? "failed"
+            : waitingForUser
+              ? "waiting_for_user"
+              : toolCalls
+                ? "processing"
+                : "completed",
           failReason: refusal ? refusal : entry.failReason,
-          updateTime: new Date().toISOString(),
+          updateTime: new Date().toISOString()
         }));
 
         if (refusal) {
@@ -1069,16 +1116,12 @@ ${skillMd}
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "completed",
-        updateTime: new Date().toISOString(),
+        updateTime: new Date().toISOString()
       }));
       this.onAssistantMessage(
-        this.buildAssistantMessage(
-          sessionId,
-          "The AI agent has taken several steps but hasn't reached a conclusion yet. Do you want to continue?",
-          null
-        ),
-        false
-      );
+        this.buildAssistantMessage(sessionId, "The AI agent has taken several steps but hasn't reached a conclusion yet. Do you want to continue?", null),
+        false,
+      )
     } catch (error) {
       const errMessage = error instanceof Error ? error.message : String(error);
       const aborted = this.isAbortLikeError(error) || sessionController.signal.aborted;
@@ -1086,11 +1129,14 @@ ${skillMd}
         ...entry,
         status: aborted ? "interrupted" : "failed",
         failReason: aborted ? "interrupted" : errMessage,
-        updateTime: new Date().toISOString(),
+        updateTime: new Date().toISOString()
       }));
 
       if (!aborted) {
-        this.onAssistantMessage(this.buildAssistantMessage(sessionId, `Request failed: ${errMessage}`, null), false);
+        this.onAssistantMessage(
+          this.buildAssistantMessage(sessionId, `Request failed: ${errMessage}`, null),
+          false,
+        );
       }
     } finally {
       if (this.sessionControllers.get(sessionId) === sessionController) {
@@ -1102,7 +1148,7 @@ ${skillMd}
 
   async compactSession(sessionId: string, signal?: AbortSignal): Promise<void> {
     this.throwIfAborted(signal);
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled } = this.createOpenAIClient();
+    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, provider, zdr } = this.createOpenAIClient();
     if (!client) {
       return;
     }
@@ -1111,12 +1157,14 @@ ${skillMd}
       return;
     }
 
-    const startIndex = sessionMessages.findIndex((message) => message.role !== "system");
+    const startIndex = sessionMessages.findIndex(
+      (message) => message.role !== "system"
+    );
     if (startIndex === -1) {
       return;
     }
 
-    const searchStart = Math.floor(startIndex + ((sessionMessages.length - startIndex) * 2) / 3);
+    const searchStart = Math.floor(startIndex + (sessionMessages.length - startIndex) * 2 / 3);
     let endIndex = -1;
     for (let i = Math.max(searchStart, startIndex); i < sessionMessages.length; i += 1) {
       if (sessionMessages[i].role !== "tool") {
@@ -1129,23 +1177,17 @@ ${skillMd}
     }
 
     const compactPrompt = getCompactPrompt(sessionMessages.slice(startIndex, endIndex));
-    const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort);
-    const response = await this.createChatCompletionStream(
-      client,
-      {
-        model,
-        messages: [{ role: "user", content: compactPrompt }],
-        ...thinkingOptions,
-      },
-      signal ? { signal } : undefined,
-      sessionId,
-      {
-        enabled: debugLogEnabled,
-        location: "SessionManager.compactSession",
-        baseURL,
-        params: { thinkingEnabled, reasoningEffort },
-      }
-    );
+    const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr);
+    const response = await this.createChatCompletionStream(client, {
+      model,
+      messages: [{ role: "user", content: compactPrompt }],
+      ...thinkingOptions
+    }, signal ? { signal } : undefined, sessionId, {
+      enabled: debugLogEnabled,
+      location: "SessionManager.compactSession",
+      baseURL,
+      params: { thinkingEnabled, reasoningEffort }
+    });
     this.throwIfAborted(signal);
     const rawLlmResponse = response.choices?.[0]?.message?.content;
     const llmResponse = typeof rawLlmResponse === "string" ? rawLlmResponse : "";
@@ -1157,7 +1199,7 @@ ${skillMd}
       ...entry,
       usage: accumulateUsage(entry.usage, responseUsage),
       activeTokens: getTotalTokens(responseUsage),
-      updateTime: now,
+      updateTime: now
     }));
 
     for (let i = startIndex; i < endIndex; i += 1) {
@@ -1176,8 +1218,8 @@ ${skillMd}
       createTime: now,
       updateTime: now,
       meta: {
-        isSummary: true,
-      },
+        isSummary: true
+      }
     };
     sessionMessages.splice(endIndex, 0, summaryMessage);
     this.saveSessionMessages(sessionId, sessionMessages);
@@ -1185,7 +1227,7 @@ ${skillMd}
 
   private getPromptToolOptions(): { webSearchEnabled: boolean } {
     return {
-      webSearchEnabled: true,
+      webSearchEnabled: true
     };
   }
 
@@ -1199,9 +1241,9 @@ ${skillMd}
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Token: machineId,
+        Token: machineId
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({})
     })
       .then(async (response) => {
         if (response.ok) {
@@ -1209,7 +1251,9 @@ ${skillMd}
         }
 
         const body = await response.text().catch(() => "");
-        throw new Error(`New prompt API request failed with status ${response.status}${body ? `: ${body}` : ""}`);
+        throw new Error(
+          `New prompt API request failed with status ${response.status}${body ? `: ${body}` : ""}`
+        );
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -1260,7 +1304,7 @@ ${skillMd}
       status: "interrupted",
       failReason: "interrupted",
       processes: null,
-      updateTime: now,
+      updateTime: now
     }));
 
     const contentParts = ["Interrupted."];
@@ -1271,7 +1315,10 @@ ${skillMd}
       contentParts.push(`Failed to kill processes: ${failedPids.join(", ")}.`);
     }
 
-    this.onAssistantMessage(this.buildUserMessage(sessionId, { text: contentParts.join(" ") }), false);
+    this.onAssistantMessage(
+      this.buildUserMessage(sessionId, { text: contentParts.join(" ") }),
+      false,
+    );
   }
 
   private isInterrupted(sessionId: string): boolean {
@@ -1319,7 +1366,8 @@ ${skillMd}
       nextMeta.paramsMd = normalizedParamsMd;
     }
 
-    const normalizedResultMd = typeof message.content === "string" ? this.buildToolResultSnippet(message.content) : "";
+    const normalizedResultMd =
+      typeof message.content === "string" ? this.buildToolResultSnippet(message.content) : "";
     if (nextMeta && normalizedResultMd) {
       nextMeta.resultMd = normalizedResultMd;
     }
@@ -1327,7 +1375,7 @@ ${skillMd}
     return {
       ...message,
       visible: typeof message.content === "string" ? !this.isInvisibleExecution(message.content) : message.visible,
-      meta: nextMeta,
+      meta: nextMeta
     };
   }
 
@@ -1369,7 +1417,7 @@ ${skillMd}
       return {
         version: 1,
         entries,
-        originalPath: parsed.originalPath || this.projectRoot,
+        originalPath: parsed.originalPath || this.projectRoot
       };
     } catch {
       return { version: 1, entries: [], originalPath: this.projectRoot };
@@ -1383,9 +1431,9 @@ ${skillMd}
       version: 1,
       entries: index.entries.map((entry) => ({
         ...entry,
-        processes: this.serializeProcesses(entry.processes),
+        processes: this.serializeProcesses(entry.processes)
       })),
-      originalPath: this.projectRoot,
+      originalPath: this.projectRoot
     };
     fs.writeFileSync(sessionsIndexPath, JSON.stringify(normalized, null, 2), "utf8");
   }
@@ -1421,7 +1469,10 @@ ${skillMd}
     fs.writeFileSync(messagePath, payload ? `${payload}\n` : "", "utf8");
   }
 
-  private updateSessionEntry(sessionId: string, updater: (entry: SessionEntry) => SessionEntry): SessionEntry | null {
+  private updateSessionEntry(
+      sessionId: string,
+      updater: (entry: SessionEntry) => SessionEntry
+  ): SessionEntry | null {
     const index = this.loadSessionsIndex();
     const entryIndex = index.entries.findIndex((entry) => entry.id === sessionId);
     if (entryIndex === -1) {
@@ -1438,12 +1489,12 @@ ${skillMd}
   private buildUserMessage(sessionId: string, prompt: UserPromptContent): SessionMessage {
     const now = new Date().toISOString();
     const imageParams =
-      prompt.imageUrls
-        ?.filter((url) => Boolean(url))
-        .map((url) => ({
-          type: "image_url",
-          image_url: { url },
-        })) ?? [];
+        prompt.imageUrls
+            ?.filter((url) => Boolean(url))
+            .map((url) => ({
+              type: "image_url",
+              image_url: { url }
+            })) ?? [];
 
     return {
       id: crypto.randomUUID(),
@@ -1455,15 +1506,22 @@ ${skillMd}
       compacted: false,
       visible: true,
       createTime: now,
-      updateTime: now,
+      updateTime: now
     };
+  }
+
+  private applyInitCommandPrompt(userPrompt: UserPromptContent): void {
+    if (userPrompt.text !== "/init") {
+      return;
+    }
+    userPrompt.text = this.renderInitCommandPrompt();
   }
 
   private renderInitCommandPrompt(): string {
     const templatePath = path.join(getExtensionRoot(), "docs", "prompts", "init_command.md.ejs");
     const template = fs.readFileSync(templatePath, "utf8");
     return ejs.render(template, {
-      agentsMdFile: this.getEffectiveProjectAgentsMdFile(),
+      agentsMdFile: this.getEffectiveProjectAgentsMdFile()
     });
   }
 
@@ -1475,12 +1533,12 @@ ${skillMd}
     const candidatePaths = [
       {
         absolutePath: path.join(this.projectRoot, ".deepcode", "AGENTS.md"),
-        displayPath: "./.deepcode/AGENTS.md",
+        displayPath: "./.deepcode/AGENTS.md"
       },
       {
         absolutePath: path.join(this.projectRoot, "AGENTS.md"),
-        displayPath: "./AGENTS.md",
-      },
+        displayPath: "./AGENTS.md"
+      }
     ];
 
     for (const candidatePath of candidatePaths) {
@@ -1488,7 +1546,7 @@ ${skillMd}
       if (content) {
         return {
           content,
-          displayPath: candidatePath.displayPath,
+          displayPath: candidatePath.displayPath
         };
       }
     }
@@ -1508,16 +1566,31 @@ ${skillMd}
     }
   }
 
-  private loadAgentInstructions(): string | null {
+  private loadAgentInstructions(): { content: string; displayPath: string } | null {
     const projectInstructions = this.loadProjectAgentInstructions();
     if (projectInstructions) {
-      return projectInstructions.content;
+      return projectInstructions;
     }
 
-    return this.readNonEmptyFile(path.join(os.homedir(), ".deepcode", "AGENTS.md"));
+    const userAgentsPath = path.join(os.homedir(), ".deepcode", "AGENTS.md");
+    const content = this.readNonEmptyFile(userAgentsPath);
+    return content
+      ? {
+          content,
+          displayPath: "~/.deepcode/AGENTS.md"
+        }
+      : null;
   }
 
-  private buildSystemMessage(sessionId: string, content: string, contentParams: unknown | null = null): SessionMessage {
+  private renderForcedAgentInstructions(agentInstructions: { content: string; displayPath: string }): string {
+    return `You must follow the AGENTS.md instructions below for every turn in this session.\n\n<agents-md path="${agentInstructions.displayPath}">\n${agentInstructions.content}\n</agents-md>`;
+  }
+
+  private buildSystemMessage(
+    sessionId: string,
+    content: string,
+    contentParams: unknown | null = null
+  ): SessionMessage {
     const now = new Date().toISOString();
     return {
       id: crypto.randomUUID(),
@@ -1529,7 +1602,7 @@ ${skillMd}
       compacted: false,
       visible: false,
       createTime: now,
-      updateTime: now,
+      updateTime: now
     };
   }
 
@@ -1551,17 +1624,17 @@ ${skillMd}
   }
 
   private buildAssistantMessage(
-    sessionId: string,
-    content: string | null,
-    toolCalls: unknown[] | null,
-    reasoningContent?: string | null
+      sessionId: string,
+      content: string | null,
+      toolCalls: unknown[] | null,
+      reasoningContent?: string | null
   ): SessionMessage {
     const now = new Date().toISOString();
     const hasReasoningContent = reasoningContent != null;
     const messageParams: { tool_calls?: unknown[]; reasoning_content?: string } | null =
       toolCalls || hasReasoningContent ? {} : null;
     if (toolCalls) {
-      messageParams!.tool_calls = toolCalls;
+      messageParams!.tool_calls = sanitizeToolCallsForReplay(toolCalls) ?? [];
     }
     if (hasReasoningContent) {
       messageParams!.reasoning_content = reasoningContent;
@@ -1577,7 +1650,7 @@ ${skillMd}
       visible: (content || reasoningContent || "").trim() ? true : false,
       createTime: now,
       updateTime: now,
-      meta: toolCalls ? { asThinking: true } : undefined,
+      meta: toolCalls ? { asThinking: true } : undefined
     };
   }
 
@@ -1605,28 +1678,41 @@ ${skillMd}
       meta: {
         function: toolFunction ?? undefined,
         paramsMd,
-        resultMd,
-      },
+        resultMd
+      }
     };
   }
 
-  private async appendToolMessages(sessionId: string, toolCalls: unknown[]): Promise<{ waitingForUser: boolean }> {
+  private async appendToolMessages(
+    sessionId: string,
+    toolCalls: unknown[]
+  ): Promise<{ waitingForUser: boolean }> {
     const toolExecutions = await this.toolExecutor.executeToolCalls(sessionId, toolCalls, {
       onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
-      shouldStop: () => this.isInterrupted(sessionId),
+      shouldStop: () => this.isInterrupted(sessionId)
     });
     if (this.isInterrupted(sessionId)) {
       return { waitingForUser: false };
     }
     let waitingForUser = false;
     const followUpMessages: SessionMessage[] = [];
+    let blockedSensitiveOutput = false;
     for (const execution of toolExecutions) {
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
       }
-      const toolFunction = this.findToolFunction(toolCalls, execution.toolCallId);
-      const toolMessage = this.buildToolMessage(sessionId, execution.toolCallId, execution.content, toolFunction);
+      if (execution.blockedSensitiveOutput === true) {
+        waitingForUser = true;
+        blockedSensitiveOutput = true;
+      }
+      const toolFunction = this.findSanitizedToolFunction(toolCalls, execution.toolCallId);
+      const toolMessage = this.buildToolMessage(
+        sessionId,
+        execution.toolCallId,
+        execution.content,
+        toolFunction
+      );
       this.appendSessionMessage(sessionId, toolMessage);
       this.onAssistantMessage(toolMessage, true);
 
@@ -1635,7 +1721,11 @@ ${skillMd}
           continue;
         }
         followUpMessages.push(
-          this.buildSystemMessage(sessionId, followUpMessage.content, followUpMessage.contentParams ?? null)
+          this.buildSystemMessage(
+            sessionId,
+            followUpMessage.content,
+            followUpMessage.contentParams ?? null
+          )
         );
       }
     }
@@ -1643,10 +1733,22 @@ ${skillMd}
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
     }
+    if (blockedSensitiveOutput) {
+      const blockedMessage = this.buildAssistantMessage(
+        sessionId,
+        "yo thats secret material, im not reading that shit. I blocked it before it could be sent to the model.",
+        null
+      );
+      this.appendSessionMessage(sessionId, blockedMessage);
+      this.onAssistantMessage(blockedMessage, true);
+    }
     return { waitingForUser };
   }
 
-  private buildOpenAIMessages(messages: SessionMessage[], thinkingEnabled: boolean): ChatCompletionMessageParam[] {
+  private buildOpenAIMessages(
+    messages: SessionMessage[],
+    thinkingEnabled: boolean,
+  ): ChatCompletionMessageParam[] {
     const activeMessages = messages.filter((message) => !message.compacted);
     const toolPairings = this.pairToolMessages(activeMessages);
     const openAIMessages: ChatCompletionMessageParam[] = [];
@@ -1683,17 +1785,19 @@ ${skillMd}
     return openAIMessages;
   }
 
-  private sessionMessageToOpenAIMessage(message: SessionMessage, thinkingEnabled: boolean): ChatCompletionMessageParam {
-    const content = this.renderOpenAIMessageContent(message);
+  private sessionMessageToOpenAIMessage(
+    message: SessionMessage,
+    thinkingEnabled: boolean
+  ): ChatCompletionMessageParam {
     const base: ChatCompletionMessageParam = {
       role: message.role,
-      content,
+      content: message.content ?? ""
     } as ChatCompletionMessageParam;
 
     const messageParams = message.messageParams as
-      | { tool_calls?: unknown[]; tool_call_id?: string; reasoning_content?: string }
-      | null
-      | undefined;
+        | { tool_calls?: unknown[]; tool_call_id?: string; reasoning_content?: string }
+        | null
+        | undefined;
     if (messageParams?.tool_calls) {
       (base as { tool_calls?: unknown[] }).tool_calls = messageParams.tool_calls;
     }
@@ -1710,27 +1814,23 @@ ${skillMd}
 
     if ((message.role === "user" || message.role === "system") && message.contentParams) {
       const contentParts: ChatCompletionContentPart[] = [];
-      if (content) {
-        contentParts.push({ type: "text", text: content });
+      if (message.content) {
+        contentParts.push({ type: "text", text: message.content });
       }
-      const params = Array.isArray(message.contentParams) ? message.contentParams : [message.contentParams];
+      const params = Array.isArray(message.contentParams)
+          ? message.contentParams
+          : [message.contentParams];
       for (const param of params) {
         if (param && typeof param === "object") {
           contentParts.push(param as ChatCompletionContentPart);
         }
       }
-      const contentValue: string | ChatCompletionContentPart[] = contentParts.length > 0 ? contentParts : content;
+      const contentValue: string | ChatCompletionContentPart[] =
+          contentParts.length > 0 ? contentParts : message.content ?? "";
       (base as { content: string | ChatCompletionContentPart[] }).content = contentValue;
     }
 
     return base;
-  }
-
-  private renderOpenAIMessageContent(message: SessionMessage): string {
-    if (message.role === "user" && message.content === "/init") {
-      return this.renderInitCommandPrompt();
-    }
-    return message.content ?? "";
   }
 
   private pairToolMessages(messages: SessionMessage[]): Map<string, number> {
@@ -1829,12 +1929,15 @@ ${skillMd}
     }
   }
 
-  private buildInterruptedOpenAIToolMessage(toolCalls: unknown[], toolCallId: string): ChatCompletionMessageParam {
+  private buildInterruptedOpenAIToolMessage(
+    toolCalls: unknown[],
+    toolCallId: string
+  ): ChatCompletionMessageParam {
     const toolFunction = this.findToolFunction(toolCalls, toolCallId);
     return {
       role: "tool",
       content: this.buildInterruptedToolResult(toolFunction, "Previous tool call did not complete."),
-      tool_call_id: toolCallId,
+      tool_call_id: toolCallId
     } as ChatCompletionMessageParam;
   }
 
@@ -1849,6 +1952,11 @@ ${skillMd}
       }
     }
     return null;
+  }
+
+  private findSanitizedToolFunction(toolCalls: unknown[], toolCallId: string): unknown | null {
+    const sanitizedToolCalls = sanitizeToolCallsForReplay(toolCalls);
+    return sanitizedToolCalls ? this.findToolFunction(sanitizedToolCalls, toolCallId) : null;
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {
@@ -1948,7 +2056,11 @@ ${skillMd}
     }
   }
 
-  private maybeNotifyTaskCompletion(sessionId: string, notifyCommand: string | undefined, startedAt: number): void {
+  private maybeNotifyTaskCompletion(
+    sessionId: string,
+    notifyCommand: string | undefined,
+    startedAt: number
+  ): void {
     if (!notifyCommand) {
       return;
     }
@@ -1969,7 +2081,7 @@ ${skillMd}
       return {
         ...entry,
         processes,
-        updateTime: now,
+        updateTime: now
       };
     });
   }
@@ -1982,7 +2094,7 @@ ${skillMd}
       return {
         ...entry,
         processes: processes.size > 0 ? processes : null,
-        updateTime: now,
+        updateTime: now
       };
     });
   }
@@ -2004,7 +2116,7 @@ ${skillMd}
   private buildInterruptedToolResult(toolFunction: unknown | null, reason: string): string {
     const toolName =
       toolFunction && typeof toolFunction === "object" && typeof (toolFunction as { name?: unknown }).name === "string"
-        ? (toolFunction as { name: string }).name
+        ? ((toolFunction as { name: string }).name)
         : "tool";
     return JSON.stringify(
       {
@@ -2012,8 +2124,8 @@ ${skillMd}
         name: toolName,
         error: reason,
         metadata: {
-          interrupted: true,
-        },
+          interrupted: true
+        }
       },
       null,
       2
@@ -2033,7 +2145,7 @@ ${skillMd}
   }
 
   private normalizeSessionEntry(entry: unknown): SessionEntry {
-    const value = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+    const value = (entry && typeof entry === "object") ? (entry as Record<string, unknown>) : {};
     return {
       id: typeof value.id === "string" ? value.id : crypto.randomUUID(),
       summary: typeof value.summary === "string" ? value.summary : null,
@@ -2047,7 +2159,7 @@ ${skillMd}
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),
-      processes: this.deserializeProcesses(value.processes),
+      processes: this.deserializeProcesses(value.processes)
     };
   }
 
@@ -2087,9 +2199,7 @@ ${skillMd}
     return processes.size > 0 ? processes : null;
   }
 
-  private serializeProcesses(
-    processes: Map<string, { startTime: string; command: string }> | null
-  ): Record<string, { startTime: string; command: string }> | null {
+  private serializeProcesses(processes: Map<string, { startTime: string; command: string }> | null): Record<string, { startTime: string; command: string }> | null {
     if (!processes || processes.size === 0) {
       return null;
     }

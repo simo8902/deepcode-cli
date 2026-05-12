@@ -5,7 +5,6 @@ import {
   backspace,
   deleteForward,
   deleteWordBefore,
-  deleteWordAfter,
   getCurrentSlashToken,
   insertText,
   killLine,
@@ -16,7 +15,7 @@ import {
   moveRight,
   moveWordLeft,
   moveWordRight,
-  moveUp,
+  moveUp
 } from "../ui";
 
 test("insertText appends text and advances the cursor", () => {
@@ -93,12 +92,6 @@ test("deleteWordBefore removes the previous word and any adjacent whitespace", (
   const result = deleteWordBefore({ text: "ask the model", cursor: 8 });
   assert.equal(result.text, "ask model");
   assert.equal(result.cursor, 4);
-});
-
-test("deleteWordAfter removes the next word and leading whitespace", () => {
-  const result = deleteWordAfter({ text: "ask the model now", cursor: 3 });
-  assert.equal(result.text, "ask model now");
-  assert.equal(result.cursor, 3);
 });
 
 test("getCurrentSlashToken returns the slash word at the cursor", () => {

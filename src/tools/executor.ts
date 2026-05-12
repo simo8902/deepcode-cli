@@ -6,6 +6,7 @@ import { handleEditTool } from "./edit-handler";
 import { handleReadTool } from "./read-handler";
 import { handleWebSearchTool } from "./web-search-handler";
 import { handleWriteTool } from "./write-handler";
+import { sanitizeForModelPipeline } from "../privacy-guard";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
@@ -17,6 +18,8 @@ export type CreateOpenAIClient = () => {
   notify?: string;
   webSearchTool?: string;
   machineId?: string;
+  provider?: string;
+  zdr?: boolean;
 };
 
 export type ToolCall = {
@@ -68,6 +71,12 @@ export type ToolCallExecution = {
   toolCallId: string;
   content: string;
   result: ToolExecutionResult;
+  blockedSensitiveOutput?: boolean;
+};
+
+type FormattedToolResult = {
+  content: string;
+  blockedSensitiveOutput: boolean;
 };
 
 export class ToolExecutor {
@@ -96,10 +105,12 @@ export class ToolExecutor {
         break;
       }
       const result = await this.executeToolCall(sessionId, toolCall, hooks);
+      const formattedResult = this.formatToolResult(result);
       executions.push({
         toolCallId: toolCall.id,
-        content: this.formatToolResult(result),
+        content: formattedResult.content,
         result,
+        blockedSensitiveOutput: formattedResult.blockedSensitiveOutput
       });
       if (hooks?.shouldStop?.()) {
         break;
@@ -141,15 +152,16 @@ export class ToolExecutor {
       return null;
     }
 
-    const rawArguments = typeof functionRecord.arguments === "string" ? functionRecord.arguments : "";
+    const rawArguments =
+      typeof functionRecord.arguments === "string" ? functionRecord.arguments : "";
 
     return {
       id: record.id,
       type: "function",
       function: {
         name: functionRecord.name,
-        arguments: rawArguments,
-      },
+        arguments: rawArguments
+      }
     };
   }
 
@@ -164,7 +176,7 @@ export class ToolExecutor {
       return {
         ok: false,
         name: toolName,
-        error: `Unknown tool: ${toolName}`,
+        error: `Unknown tool: ${toolName}`
       };
     }
 
@@ -173,7 +185,7 @@ export class ToolExecutor {
       return {
         ok: false,
         name: toolName,
-        error: parsedArgs.error,
+        error: parsedArgs.error
       };
     }
 
@@ -184,14 +196,14 @@ export class ToolExecutor {
         toolCall,
         createOpenAIClient: this.createOpenAIClient,
         onProcessStart: hooks?.onProcessStart,
-        onProcessExit: hooks?.onProcessExit,
+        onProcessExit: hooks?.onProcessExit
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
         ok: false,
         name: toolName,
-        error: message,
+        error: message
       };
     }
   }
@@ -215,15 +227,15 @@ export class ToolExecutor {
         ok: false,
         error:
           `InputParseError: Failed to parse tool arguments: ${message}. ` +
-          "Ensure the tool call arguments are valid JSON. Prefer Edit over Write for large existing-file changes.",
+          "Ensure the tool call arguments are valid JSON. Prefer Edit over Write for large existing-file changes."
       };
     }
   }
 
-  private formatToolResult(result: ToolExecutionResult): string {
+  private formatToolResult(result: ToolExecutionResult): FormattedToolResult {
     const payload: Record<string, unknown> = {
       ok: result.ok,
-      name: result.name,
+      name: result.name
     };
 
     if (typeof result.output !== "undefined") {
@@ -242,6 +254,24 @@ export class ToolExecutor {
       payload.awaitUserResponse = true;
     }
 
-    return JSON.stringify(payload, null, 2);
+    const sanitized = sanitizeForModelPipeline(payload);
+    if (sanitized.blocked) {
+      return {
+        content: JSON.stringify({
+          ok: false,
+          name: result.name,
+          blockedSensitiveOutput: true,
+          error: "Tool output contained high-risk secret material and was redacted before model replay.",
+          awaitUserResponse: true
+        }, null, 2),
+        blockedSensitiveOutput: true
+      };
+    }
+
+    return {
+      content: JSON.stringify(sanitized.value, null, 2),
+      blockedSensitiveOutput: false
+    };
   }
+
 }

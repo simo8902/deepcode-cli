@@ -1,115 +1,105 @@
 # Deep Code CLI
 
-[Deep Code](https://github.com/lessweb/deepcode-cli) 是专为 `deepseek-v4` 模型优化的终端 AI 编码助手，支持深度思考、推理强度控制以及 Agent Skills。
+The system prompt in this codebase is heavily modified, please rewrite before use!
 
-## 安装
+Deep Code CLI is a heavily modified terminal AI coding agent for running DeepSeek and other OpenAI-compatible models through a stricter privacy layer.
+This fork is focused on company-code usage: reducing accidental leaks, sanitizing the final HTTP payload before it reaches a provider, and keeping provider routing explicit.
 
-```bash
-npm install -g @vegamo/deepcode-cli
+## Security Model
+
+This CLI is designed to make accidental leakage harder, not impossible
+It protects the model request pipeline by scanning and sanitizing the JSON body that is actually sent upstream. That includes user messages, system messages, assistant reasoning fields, tool messages, and nested request fields
+It does not replace normal company security controls. You should still avoid pasting real production secrets, use provider ZDR when available, keep fallback routing disabled, and review final-boundary logs during hardening
+
+## Privacy Controls
+
+### Final Request Sanitization
+
+Before any request is sent to the model provider, the CLI builds a sanitized outbound request body.
+
+The sanitizer redacts:
+
+- Password-like phrases.
+- JWTs.
+- PEM private keys.
+- Known API key formats.
+- GitHub tokens.
+- AWS access keys.
+- Unknown high-entropy secret-looking tokens.
+- Absolute local paths in model-replayed content.
+
+High-risk secrets are blocked before send. Generic test credentials are redacted instead of failing the session.
+
+### Tool Output Protection
+
+Tool results are scanned before they become `tool` messages. If a tool output contains high-risk secret material, the CLI blocks automatic continuation and inserts a local warning instead of sending the raw result to the model.
+
+### Sensitive File Reads
+
+Obvious secret-bearing files are refused by default, including `.env`, `.npmrc`, `.pypirc`, private keys, certificate/key stores, kube configs, Docker configs, cloud credentials, and service-account JSON files.
+
+## Configuration
+
+Create or edit:
+
+```text
+~/.deepcode/settings.json
 ```
 
-在任意项目目录下运行 `deepcode` 即可启动。
-
-![intro2](resources/intro2.png)
-
-## 配置
-
-创建 `~/.deepcode/settings.json` 文件，内容如下：
+Example OpenRouter + DeepSeek configuration:
 
 ```json
 {
   "env": {
-    "MODEL": "deepseek-v4-pro",
-    "BASE_URL": "https://api.deepseek.com",
-    "API_KEY": "sk-..."
+    "MODEL": "deepseek/deepseek-v4-pro",
+    "BASE_URL": "https://openrouter.ai/api/v1",
+    "API_KEY": "sk-or-...",
+    "PROVIDER": "siliconflow",
+    "ZDR": "true"
   },
+  "debugLogEnabled": true,
   "thinkingEnabled": true,
   "reasoningEffort": "max"
 }
 ```
 
-配置文件与 [Deep Code VSCode 插件](https://github.com/lessweb/deepcode) 共享，无需重复配置。
+To explicitly allow sensitive reads:
 
-## 主要功能
-
-### **Skills**
-Deep Code CLI 支持 agent skills，允许您扩展助手的能力：
-
-- **User-level Skills**：从 `~/.agents/skills/` 目录中发现并激活 skills。
-- **Project-level Skills**：从 `./.agents/skills/` 目录中加载项目专属 skills，并兼容旧的 `./.deepcode/skills/` 目录。
-
-### **为 DeepSeek 优化**
-- 专门为 DeepSeek 模型性能调优。
-- 通过使用[上下文缓存](https://api-docs.deepseek.com/guides/kv_cache)来降低成本。
-- 原生支持[思考模式](https://api-docs.deepseek.com/guides/thinking_mode)和思考强度控制。
-
-## 快捷键
-
-| 键              | 操作                              |
-|-----------------|-----------------------------------|
-| `Enter`         | 发送消息                          |
-| `Shift+Enter`   | 插入换行（也可用 `Ctrl+J`）       |
-| `Ctrl+V`        | 从剪贴板粘贴图片                  |
-| `Esc`           | 中断当前模型回复                  |
-| `/`             | 打开 skills / 命令菜单            |
-| `/new`          | 开始新对话                        |
-| `/resume`       | 选择历史对话继续                  |
-| `/skills`       | 列出可用 skills                   |
-| `/exit`         | 退出                              |
-| 连续 `Ctrl+D`   | 退出                              |
-
-## 支持的模型
-
-- `deepseek-v4-pro`（推荐使用）
-- `deepseek-v4-flash`
-- 任何其他 OpenAI 兼容模型
-
-
-## 常见问题
-
-### Deep Code 是否有 VSCode 插件？
-
-有的。Deep Code 提供功能完整的 VSCode 插件，可在 [VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=vegamo.deepcode-vscode) 安装。插件与 CLI 共享 `~/.deepcode/settings.json` 配置文件，可以在终端和编辑器之间无缝切换。
-
-### Deep Code 是否支持理解图片？
-
-Deep Code 支持多模态，可使用ctrl+v从剪贴板粘贴图片。但目前 deepseek-v4 不支持多模态。有些模型虽然有多模态能力，但对多轮对话请求的限制太严。目前多模态输入推荐使用火山方舟的 Doubao-Seed-2.0-pro 模型，适配效果最好。
-
-### 怎样在任务完成后自动给 Slack 发消息？
-
-编写一个调用 Slack webhook 的 Shell 通知脚本，然后在 `~/.deepcode/settings.json` 中将 `notify` 字段设为该脚本的完整路径即可。详细步骤可参考：https://binfer.net/share/jby5xnc-so6g
-
-### 怎样启用联网搜索功能？
-
-Deep Code自带免费的、且大部分情况够用的Web Search工具。如果你希望使用自定义脚本进行联网搜索，可以在 `~/.deepcode/settings.json` 中将 `webSearchTool` 设为脚本的完整路径即可。详细步骤可参考：https://github.com/qorzj/web_search_cli
-
-### 是否支持 Coding Plan？
-
-支持。只要把 `~/.deepcode/settings.json` 的 `env.BASE_URL` 配置为 OpenAI 兼容的接口地址就行。以火山方舟的 Coding Plan 为例：
-
-```json
-{
-  "env": {
-    "MODEL": "ark-code-latest",
-    "BASE_URL": "https://ark.cn-beijing.volces.com/api/coding/v3",
-    "API_KEY": "**************"
-  },
-  "thinkingEnabled": true
-}
+```powershell
+$env:DEEPCODE_ALLOW_SENSITIVE_READS="true"
+node dist/cli.js
 ```
 
-## 获取帮助
+Logs are written to:
 
-- 在 GitHub Issues 上报告错误或请求功能 (https://github.com/lessweb/deepcode-cli/issues)
+```text
+%USERPROFILE%\.deepcode\logs\final-http-body.jsonl
+```
 
-## 协议
+## Keyboard Shortcuts
 
-- MIT
+| Key | Action |
+| --- | --- |
+| `Enter` | Send message |
+| `Shift+Enter` | Insert newline |
+| `Ctrl+V` | Paste image from clipboard where supported |
+| `Esc` | Interrupt current response |
+| `/` | Open command menu |
+| `/new` | Start a new session |
+| `/resume` | Resume a previous session |
+| `/skills` | List available skills |
+| `/exit` | Exit |
+| `Ctrl+D` twice | Exit |
 
-## 支持我们
 
-如果你觉得这个工具对你有帮助，请考虑通过以下方式支持我们：
+## Important Notes
 
-- 在 GitHub 上给我们一个 Star (https://github.com/lessweb/deepcode-cli)
-- 向我们提交反馈和建议
-- 分享给你的朋友和同事
+- ZDR helps with provider retention, but it does not replace local redaction and blocking.
+- Provider fallback should stay disabled for company-code use.
+- Secret detection is regex and entropy based; it is strong but not perfect.
+- The model can still receive sanitized proprietary code and context.
+- Review boundary logs while hardening, then disable them.
+
+## License
+
+MIT

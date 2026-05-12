@@ -50,7 +50,10 @@ export function isAbsoluteFilePath(filePath: string, platform: NodeJS.Platform =
   }
 
   const normalized = path.win32.normalize(nativePath);
-  return path.win32.isAbsolute(normalized) && (/^[A-Za-z]:[\\/]/.test(normalized) || /^\\\\/.test(normalized));
+  return (
+    path.win32.isAbsolute(normalized) &&
+    (/^[A-Za-z]:[\\/]/.test(normalized) || /^\\\\/.test(normalized))
+  );
 }
 
 function isGitBashAbsolutePath(filePath: string): boolean {
@@ -71,7 +74,7 @@ export function recordFileState(sessionId: string, state: FileState): void {
   const normalizedPath = normalizeFilePath(state.filePath);
   sessionState.set(normalizedPath, {
     ...state,
-    filePath: normalizedPath,
+    filePath: normalizedPath
   });
 }
 
@@ -92,7 +95,7 @@ export function markFileRead(
     limit: state?.limit,
     isPartialView: state?.isPartialView,
     encoding: state?.encoding,
-    lineEndings: state?.lineEndings,
+    lineEndings: state?.lineEndings
   });
 }
 
@@ -110,7 +113,10 @@ export function wasFileRead(sessionId: string, filePath: string): boolean {
 
 export function isFullFileView(state: FileState | null): boolean {
   return Boolean(
-    state && !state.isPartialView && typeof state.offset === "undefined" && typeof state.limit === "undefined"
+    state &&
+      !state.isPartialView &&
+      typeof state.offset === "undefined" &&
+      typeof state.limit === "undefined"
   );
 }
 
@@ -133,7 +139,7 @@ export function createSnippet(
     filePath: normalizeFilePath(filePath),
     startLine,
     endLine,
-    preview,
+    preview
   };
 
   let snippets = snippetsBySession.get(sessionId);
