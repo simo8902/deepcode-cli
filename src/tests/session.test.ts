@@ -219,7 +219,7 @@ test("SessionManager replays normal assistant messages with reasoning content in
 test("SessionManager normalizes legacy sessions without activeTokens to zero", () => {
   const workspace = createTempDir("deepcode-legacy-active-tokens-workspace-");
   const home = createTempDir("deepcode-legacy-active-tokens-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const projectCode = workspace.replace(/[\\/]/g, "-").replace(/:/g, "");
   const projectDir = path.join(home, ".deepcode", "projects", projectCode);
@@ -250,7 +250,7 @@ test("SessionManager normalizes legacy sessions without activeTokens to zero", (
 test("SessionManager marks skills loaded from existing session messages", async () => {
   const workspace = createTempDir("deepcode-loaded-skills-workspace-");
   const home = createTempDir("deepcode-loaded-skills-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const skillDir = path.join(home, ".agents", "skills", "lessweb-starter");
   fs.mkdirSync(skillDir, { recursive: true });
@@ -298,7 +298,7 @@ test("SessionManager marks skills loaded from existing session messages", async 
 test("SessionManager lists project skills from .agents with legacy .deepcode compatibility", async () => {
   const workspace = createTempDir("deepcode-project-skills-workspace-");
   const home = createTempDir("deepcode-project-skills-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const userSkillDir = path.join(home, ".agents", "skills", "shared");
   fs.mkdirSync(userSkillDir, { recursive: true });
@@ -338,7 +338,7 @@ test("SessionManager lists project skills from .agents with legacy .deepcode com
 test("createSession expands /init with the active .deepcode project AGENTS path", async () => {
   const workspace = createTempDir("deepcode-init-deepcode-workspace-");
   const home = createTempDir("deepcode-init-deepcode-home-");
-  process.env.HOME = home;
+  setTestHome(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.mkdirSync(path.join(workspace, ".deepcode"), { recursive: true });
@@ -365,7 +365,7 @@ test("createSession expands /init with the active .deepcode project AGENTS path"
 test("createSession forces user AGENTS instructions when no project AGENTS file exists", async () => {
   const workspace = createTempDir("deepcode-user-agents-workspace-");
   const home = createTempDir("deepcode-user-agents-home-");
-  process.env.HOME = home;
+  setTestHome(home);
   process.env.USERPROFILE = home;
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
@@ -389,7 +389,7 @@ test("createSession forces user AGENTS instructions when no project AGENTS file 
 test("replySession expands /init with the active root project AGENTS path", async () => {
   const workspace = createTempDir("deepcode-init-root-workspace-");
   const home = createTempDir("deepcode-init-root-home-");
-  process.env.HOME = home;
+  setTestHome(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.writeFileSync(path.join(workspace, "AGENTS.md"), "root project instructions", "utf8");
@@ -410,7 +410,7 @@ test("replySession expands /init with the active root project AGENTS path", asyn
 test("createSession expands /init as generate when no project AGENTS file is effective", async () => {
   const workspace = createTempDir("deepcode-init-generate-workspace-");
   const home = createTempDir("deepcode-init-generate-home-");
-  process.env.HOME = home;
+  setTestHome(home);
   globalThis.fetch = (async () => ({ ok: true, text: async () => "" }) as Response) as typeof fetch;
 
   fs.mkdirSync(path.join(home, ".deepcode"), { recursive: true });
@@ -431,7 +431,7 @@ test("createSession expands /init as generate when no project AGENTS file is eff
 test("createSession reports a new prompt with the machineId token", async () => {
   const workspace = createTempDir("deepcode-session-workspace-");
   const home = createTempDir("deepcode-session-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -463,7 +463,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
 test("replySession reports a new prompt with the machineId token", async () => {
   const workspace = createTempDir("deepcode-reply-workspace-");
   const home = createTempDir("deepcode-reply-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
@@ -494,7 +494,7 @@ test("replySession reports a new prompt with the machineId token", async () => {
 test("replySession preserves raw session messages when a previous tool call is pending", async () => {
   const workspace = createTempDir("deepcode-pending-tool-workspace-");
   const home = createTempDir("deepcode-pending-tool-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   globalThis.fetch = (async () => ({
     ok: true,
@@ -861,7 +861,7 @@ test("buildOpenAIMessages ignores tool messages that appear before their assista
 test("SessionManager accumulates response usage while active tokens track the latest response", async () => {
   const workspace = createTempDir("deepcode-usage-workspace-");
   const home = createTempDir("deepcode-usage-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const responses = [
     createChatResponse("first", {
@@ -903,7 +903,7 @@ test("SessionManager accumulates response usage while active tokens track the la
 test("SessionManager resets active tokens to latest post-compaction response usage", async () => {
   const workspace = createTempDir("deepcode-compact-usage-workspace-");
   const home = createTempDir("deepcode-compact-usage-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const responses = [
     createChatResponse("large", {
@@ -940,7 +940,7 @@ test("SessionManager resets active tokens to latest post-compaction response usa
 test("SessionManager streams chat completions and counts reasoning progress", async () => {
   const workspace = createTempDir("deepcode-stream-workspace-");
   const home = createTempDir("deepcode-stream-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const progressEvents: Array<{
     phase: string;
@@ -1006,10 +1006,231 @@ test("SessionManager streams chat completions and counts reasoning progress", as
   assert.equal(progressEvents[2]?.formattedTokens, "3");
 });
 
+test("SessionManager merges streamed tool call chunks without provider indexes", async () => {
+  const manager = createSessionManager(process.cwd(), "machine-id-unindexed-tool-stream");
+  const client = {
+    chat: {
+      completions: {
+        create: async () =>
+          createChatStreamResponse([
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        id: "call-1",
+                        type: "function",
+                        function: { name: "bash", arguments: "{\"command\":\"echo" }
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        function: { arguments: " hi\"}" }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ])
+      }
+    }
+  };
+
+  const response = await (manager as any).createChatCompletionStream(
+    client,
+    { model: "test-model", messages: [] }
+  );
+  const toolCalls = response.choices?.[0]?.message?.tool_calls;
+
+  assert.equal(toolCalls?.length, 1);
+  assert.deepEqual(toolCalls?.[0], {
+    id: "call-1",
+    type: "function",
+    function: { name: "bash", arguments: "{\"command\":\"echo hi\"}" }
+  });
+});
+
+test("SessionManager keeps OpenRouter cache control and replays tool results across one prompt", async () => {
+  const workspace = createTempDir("deepcode-tool-chain-workspace-");
+  const home = createTempDir("deepcode-tool-chain-home-");
+  setTestHome(home);
+  const targetPath = path.join(workspace, "cache-chain.txt");
+  const requests: Record<string, unknown>[] = [];
+  const responses = [
+    createToolCallResponse("call-write", "write", {
+      file_path: targetPath,
+      content: "remembered from tool one"
+    }),
+    createToolCallResponse("call-read", "read", {
+      file_path: targetPath
+    }),
+    createChatResponse("done", {
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+      prompt_tokens_details: { cached_tokens: 6 }
+    })
+  ];
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: Record<string, unknown>) => {
+          requests.push(request);
+          const response = responses.shift();
+          assert.ok(response, "expected a queued chat response");
+          return response;
+        }
+      }
+    }
+  };
+  const manager = new SessionManager({
+    projectRoot: workspace,
+    createOpenAIClient: () => ({
+      client: client as any,
+      model: "provider/model-under-test",
+      baseURL: "https://openrouter.ai/api/v1",
+      thinkingEnabled: false
+    }),
+    getResolvedSettings: () => ({}),
+    renderMarkdown: (text) => text,
+    onAssistantMessage: () => {}
+  });
+
+  const sessionId = await manager.createSession({ text: "" });
+  const secondRequestMessages = requests[1]?.messages as Array<{ role: string; content?: string }> | undefined;
+  const sessionMessages = manager.listSessionMessages(sessionId);
+
+  assert.equal(requests.length, 3);
+  assert.deepEqual(
+    requests.map((request) => request.cache_control),
+    [
+      { type: "ephemeral", ttl: "1h" },
+      { type: "ephemeral", ttl: "1h" },
+      { type: "ephemeral", ttl: "1h" }
+    ]
+  );
+  assert.ok(
+    secondRequestMessages?.some((message) =>
+      message.role === "tool" &&
+      typeof message.content === "string" &&
+      message.content.includes("cache-chain.txt") &&
+      message.content.includes("Created file.")
+    )
+  );
+  assert.ok(
+    sessionMessages.some((message) =>
+      message.role === "tool" &&
+      typeof message.content === "string" &&
+      message.content.includes("remembered from tool one")
+    )
+  );
+});
+
+test("SessionManager final HTTP body logging records the exact outbound request when enabled", async () => {
+  const workspace = createTempDir("deepcode-final-body-workspace-");
+  const home = createTempDir("deepcode-final-body-home-");
+  setTestHome(home);
+  const oldLogFlag = process.env.DEEPCODE_LOG_FINAL_HTTP_BODY;
+  process.env.DEEPCODE_LOG_FINAL_HTTP_BODY = "true";
+  const manager = createSessionManager(workspace, "machine-id-final-body");
+  const targetPath = path.join(workspace, "exact-path.txt");
+  const client = {
+    chat: {
+      completions: {
+        create: async () => createChatResponse("ok", { total_tokens: 1 })
+      }
+    }
+  };
+
+  try {
+    await (manager as any).createChatCompletionStream(
+      client,
+      {
+        model: "provider/model-under-test",
+        messages: [{ role: "user", content: `read ${targetPath}` }]
+      },
+      undefined,
+      "session-final-body"
+    );
+  } finally {
+    if (oldLogFlag === undefined) {
+      delete process.env.DEEPCODE_LOG_FINAL_HTTP_BODY;
+    } else {
+      process.env.DEEPCODE_LOG_FINAL_HTTP_BODY = oldLogFlag;
+    }
+  }
+
+  const logPath = path.join(home, ".deepcode", "logs", "final-http-body.jsonl");
+  const entries = fs.readFileSync(logPath, "utf8").trim().split(/\r?\n/);
+  const last = JSON.parse(entries[entries.length - 1] ?? "{}") as {
+    body?: { messages?: Array<{ content?: string }> };
+  };
+
+  assert.equal(last.body?.messages?.[0]?.content, `read ${targetPath}`);
+});
+
+test("SessionManager strict provider privacy redacts credentials without redacting replay paths", async () => {
+  const workspace = createTempDir("deepcode-strict-provider-privacy-workspace-");
+  const manager = createSessionManager(workspace, "machine-id-strict-provider-privacy");
+  let seenRequest: Record<string, unknown> | null = null;
+  const targetPath = path.join(workspace, "main.cpp");
+  const client = {
+    chat: {
+      completions: {
+        create: async (request: Record<string, unknown>) => {
+          seenRequest = request;
+          return createChatResponse("ok", { total_tokens: 1 });
+        }
+      }
+    }
+  };
+
+  await (manager as any).createChatCompletionStream(
+    client,
+    {
+      model: "provider/model-under-test",
+      messages: [
+        {
+          role: "tool",
+          content:
+            `read ${targetPath} token_count=42 api_key=sk-or-abcdef1234567890 ` +
+            "grep PRODUCTION_PASSWORD\\|Prod34126412\n" +
+            "#define PRODUCTION_PASSWORD !Prod34126412\n" +
+            "Babe... it's literally `!Prod34126412` wrapped in `PRODUCTION_PASSWORD`."
+        }
+      ]
+    },
+    undefined,
+    "session-strict-provider-privacy",
+    undefined,
+    "strict"
+  );
+
+  const requestText = JSON.stringify(seenRequest);
+  assert.match(requestText, /main\.cpp/);
+  assert.match(requestText, /token_count=42/);
+  assert.match(requestText, /PRODUCTION_PASSWORD/);
+  assert.doesNotMatch(requestText, /sk-or-/);
+  assert.doesNotMatch(requestText, /Prod34126412/);
+  assert.doesNotMatch(requestText, /!Prod/);
+  assert.match(requestText, /\[REDACTED_API_KEY\]/);
+  assert.match(requestText, /\[REDACTED_SECRET\]/);
+});
+
 test("SessionManager cancels skill matching before a session is created", async () => {
   const workspace = createTempDir("deepcode-skill-abort-workspace-");
   const home = createTempDir("deepcode-skill-abort-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   const skillDir = path.join(home, ".agents", "skills", "demo");
   fs.mkdirSync(skillDir, { recursive: true });
@@ -1044,7 +1265,7 @@ test("SessionManager cancels skill matching before a session is created", async 
 test("SessionManager treats OpenAI APIUserAbortError as interrupted", async () => {
   const workspace = createTempDir("deepcode-api-abort-workspace-");
   const home = createTempDir("deepcode-api-abort-home-");
-  process.env.HOME = home;
+  setTestHome(home);
 
   let manager: SessionManager;
   const client = {
@@ -1154,6 +1375,34 @@ function createChatResponse(content: string, usage: Record<string, unknown>): un
   };
 }
 
+function createToolCallResponse(
+  toolCallId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  usage: Record<string, unknown> = { total_tokens: 1 }
+): unknown {
+  return {
+    choices: [
+      {
+        message: {
+          content: "",
+          tool_calls: [
+            {
+              id: toolCallId,
+              type: "function",
+              function: {
+                name: toolName,
+                arguments: JSON.stringify(args)
+              }
+            }
+          ]
+        }
+      }
+    ],
+    usage
+  };
+}
+
 function buildTestMessage(
   id: string,
   sessionId: string,
@@ -1178,6 +1427,11 @@ async function* createChatStreamResponse(chunks: Record<string, unknown>[]): Asy
   for (const chunk of chunks) {
     yield chunk;
   }
+}
+
+function setTestHome(home: string): void {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
 }
 
 function createTempDir(prefix: string): string {

@@ -1,12 +1,11 @@
 import type OpenAI from "openai";
-import type { ReasoningEffort } from "../settings";
+import type { ProviderPrivacyMode, ReasoningEffort } from "../settings";
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
 import { handleReadTool } from "./read-handler";
 import { handleWebSearchTool } from "./web-search-handler";
 import { handleWriteTool } from "./write-handler";
-import { sanitizeForModelPipeline } from "../privacy-guard";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
@@ -19,6 +18,7 @@ export type CreateOpenAIClient = () => {
   webSearchTool?: string;
   machineId?: string;
   provider?: string;
+  providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
 };
 
@@ -71,12 +71,6 @@ export type ToolCallExecution = {
   toolCallId: string;
   content: string;
   result: ToolExecutionResult;
-  redactedSensitiveOutput?: boolean;
-};
-
-type FormattedToolResult = {
-  content: string;
-  redactedSensitiveOutput: boolean;
 };
 
 export class ToolExecutor {
@@ -105,12 +99,10 @@ export class ToolExecutor {
         break;
       }
       const result = await this.executeToolCall(sessionId, toolCall, hooks);
-      const formattedResult = this.formatToolResult(result);
       executions.push({
         toolCallId: toolCall.id,
-        content: formattedResult.content,
-        result,
-        redactedSensitiveOutput: formattedResult.redactedSensitiveOutput
+        content: this.formatToolResult(result),
+        result
       });
       if (hooks?.shouldStop?.()) {
         break;
@@ -232,7 +224,7 @@ export class ToolExecutor {
     }
   }
 
-  private formatToolResult(result: ToolExecutionResult): FormattedToolResult {
+  private formatToolResult(result: ToolExecutionResult): string {
     const payload: Record<string, unknown> = {
       ok: result.ok,
       name: result.name
@@ -254,21 +246,7 @@ export class ToolExecutor {
       payload.awaitUserResponse = true;
     }
 
-    const sanitized = sanitizeForModelPipeline(payload);
-    const sanitizedPayload: Record<string, unknown> =
-      sanitized.value && typeof sanitized.value === "object" && !Array.isArray(sanitized.value)
-        ? { ...(sanitized.value as Record<string, unknown>) }
-        : { value: sanitized.value };
-
-    if (sanitized.redactedSensitiveContent) {
-      sanitizedPayload.privacyWarning =
-        "Sensitive-looking material was redacted before model replay. Continue using the sanitized output.";
-    }
-
-    return {
-      content: JSON.stringify(sanitizedPayload, null, 2),
-      redactedSensitiveOutput: sanitized.redactedSensitiveContent
-    };
+    return JSON.stringify(payload, null, 2);
   }
 
 }

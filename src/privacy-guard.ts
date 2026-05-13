@@ -1,3 +1,5 @@
+import { DeepRedact } from "@hackylabs/deep-redact";
+
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 const PRIVATE_KEY_PATTERN =
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
@@ -9,12 +11,45 @@ const PASSWORD_PHRASE_PATTERN =
   /\b(password|passwd|pwd)\b\s+(?:is\s+|as\s+|=+\s*)?["']?[^"',\s}]{4,}/gi;
 const HIGH_RISK_ASSIGNMENT_SECRET_PATTERN =
   /\b(?:api[_-]?key|authorization|bearer|client[_-]?secret|jwt|private[_-]?key|refresh[_-]?token|token)\b\s*[:=]\s*["']?(?:eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[0-9A-Z]{16})/gi;
+const STRICT_SECRET_VALUE_NEAR_KEYWORD_PATTERN =
+  /(\b[A-Za-z0-9_]*(?:api[_-]?key|authorization|bearer|client[_-]?secret|jwt|password|passwd|pwd|private[_-]?key|refresh[_-]?token|secret|token)[A-Za-z0-9_]*\b(?:\\\||\||\s*[:=]\s*|\s+)["']?[!$%&*?@#-]?)([A-Za-z0-9+/_=-]{4,})/gi;
+const STRICT_SECRET_KEYWORD_CONTEXT_PATTERN =
+  /\b[A-Za-z0-9_]*(?:api[_-]?key|authorization|bearer|client[_-]?secret|jwt|password|passwd|pwd|private[_-]?key|refresh[_-]?token|secret|token)[A-Za-z0-9_]*\b/i;
+const STRICT_PUNCTUATED_SECRET_VALUE_PATTERN =
+  /(?<![A-Za-z0-9+/_=-])([!$%&*?@#][A-Za-z0-9+/_=-]{4,})(?![A-Za-z0-9+/_=-])/g;
 const HIGH_ENTROPY_TOKEN_PATTERN =
   /(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}(?![A-Za-z0-9+/_=-])/g;
 const TEST_PLACEHOLDER_CONTEXT_PATTERN =
   /\b(?:demo|dummy|example|fake|fixture|mock|placeholder|sample|test|testing)\b/i;
 const WINDOWS_PATH_PATTERN = /\b[A-Za-z]:\\(?:[^\\\s"'{}[\],:]+\\)*[^\\\s"'{}[\],:]*/g;
 const POSIX_PATH_PATTERN = /(?<![:\w])\/(?:Users|home|tmp|var|etc|mnt|opt|workspace|root)\/[^\s"'{}[\],)]*/g;
+const PROVIDER_SECRET_STRING_TEST_PATTERN =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b|\b(?:sk-or-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[0-9A-Z]{16})\b|\b[A-Za-z0-9_]*(?:api[_-]?key|authorization|bearer|client[_-]?secret|jwt|password|passwd|pwd|private[_-]?key|refresh[_-]?token|secret|token)[A-Za-z0-9_]*\b|(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}(?![A-Za-z0-9+/_=-])/i;
+
+const providerStrictRedactor = new DeepRedact({
+  serialize: false,
+  replacement: "[REDACTED_SECRET]",
+  blacklistedKeys: [
+    /api[_-]?key/i,
+    /authorization/i,
+    /bearer/i,
+    /client[_-]?secret/i,
+    /jwt/i,
+    /password/i,
+    /passwd/i,
+    /pwd/i,
+    /private[_-]?key/i,
+    /refresh[_-]?token/i,
+    /secret/i,
+    /token/i
+  ],
+  stringTests: [
+    {
+      pattern: PROVIDER_SECRET_STRING_TEST_PATTERN,
+      replacer: (value) => redactHighRiskString(value)
+    }
+  ]
+});
 
 export type PipelineSanitizationResult = {
   value: unknown;
@@ -42,6 +77,18 @@ export function sanitizeForModelPipeline(value: unknown): PipelineSanitizationRe
   const redactedSensitiveContent = containsHighRiskSecret(value);
   return {
     value: sanitizeValue(value),
+    redactedSensitiveContent
+  };
+}
+
+export function sanitizeForProviderStrict(value: unknown): PipelineSanitizationResult {
+  const redactedValue = providerStrictRedactor.redact(value);
+  const redactedSensitiveContent =
+    safeJsonStringify(value) !== safeJsonStringify(redactedValue) ||
+    containsHighRiskSecret(value) ||
+    containsStrictSecretPattern(value);
+  return {
+    value: redactedValue,
     redactedSensitiveContent
   };
 }
@@ -108,6 +155,47 @@ function redactString(value: string): string {
     )
     .replace(WINDOWS_PATH_PATTERN, "[REDACTED_PATH]")
     .replace(POSIX_PATH_PATTERN, "[REDACTED_PATH]");
+}
+
+function redactHighRiskString(value: string): string {
+  resetPatterns();
+  let redacted = value
+    .replace(PRIVATE_KEY_PATTERN, "[REDACTED_PRIVATE_KEY]")
+    .replace(JWT_PATTERN, "[REDACTED_JWT]")
+    .replace(API_KEY_VALUE_PATTERN, "[REDACTED_API_KEY]")
+    .replace(HIGH_RISK_ASSIGNMENT_SECRET_PATTERN, (match) => {
+      const separatorIndex = Math.max(match.indexOf("="), match.indexOf(":"));
+      return separatorIndex >= 0
+        ? `${match.slice(0, separatorIndex + 1)}[REDACTED_SECRET]`
+        : "[REDACTED_SECRET]";
+    })
+    .replace(STRICT_SECRET_VALUE_NEAR_KEYWORD_PATTERN, (_match, prefix: string) =>
+      `${prefix}[REDACTED_SECRET]`
+    )
+    .replace(HIGH_ENTROPY_TOKEN_PATTERN, (match) =>
+      isHighEntropySecretCandidate(match) ? "[REDACTED_HIGH_ENTROPY_SECRET]" : match
+    );
+  if (STRICT_SECRET_KEYWORD_CONTEXT_PATTERN.test(value)) {
+    redacted = redacted.replace(STRICT_PUNCTUATED_SECRET_VALUE_PATTERN, "[REDACTED_SECRET]");
+  }
+  return redacted;
+}
+
+function containsStrictSecretPattern(value: unknown): boolean {
+  let found = false;
+  walkStrings(value, (text) => {
+    if (
+      STRICT_SECRET_VALUE_NEAR_KEYWORD_PATTERN.test(text) ||
+      (
+        STRICT_SECRET_KEYWORD_CONTEXT_PATTERN.test(text) &&
+        STRICT_PUNCTUATED_SECRET_VALUE_PATTERN.test(text)
+      )
+    ) {
+      found = true;
+    }
+    resetPatterns();
+  });
+  return found;
 }
 
 function hasHighEntropySecret(text: string): boolean {
@@ -221,7 +309,17 @@ function resetPatterns(): void {
   ASSIGNMENT_SECRET_PATTERN.lastIndex = 0;
   PASSWORD_PHRASE_PATTERN.lastIndex = 0;
   HIGH_RISK_ASSIGNMENT_SECRET_PATTERN.lastIndex = 0;
+  STRICT_SECRET_VALUE_NEAR_KEYWORD_PATTERN.lastIndex = 0;
+  STRICT_PUNCTUATED_SECRET_VALUE_PATTERN.lastIndex = 0;
   HIGH_ENTROPY_TOKEN_PATTERN.lastIndex = 0;
   WINDOWS_PATH_PATTERN.lastIndex = 0;
   POSIX_PATH_PATTERN.lastIndex = 0;
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
 }

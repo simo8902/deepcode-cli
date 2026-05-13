@@ -6,10 +6,13 @@ export type DeepcodingEnv = {
   API_KEY?: string;
   THINKING?: string;
   PROVIDER?: string;
+  PROVIDER_PRIVACY?: string;
+  providerPrivacyMode?: string;
   ZDR?: string;
 };
 
 export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
+export type ProviderPrivacyMode = "off" | "strict";
 
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
@@ -18,6 +21,7 @@ export type DeepcodingSettings = {
   debugLogEnabled?: boolean;
   notify?: string;
   webSearchTool?: string;
+  providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
 };
 
@@ -31,6 +35,7 @@ export type ResolvedDeepcodingSettings = {
   notify?: string;
   webSearchTool?: string;
   provider?: string;
+  providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
 };
 
@@ -58,6 +63,10 @@ function resolveThinkingEnabled(
   return defaultsToThinkingMode(model);
 }
 
+function resolveProviderPrivacyMode(value: unknown): ProviderPrivacyMode {
+  return value === "strict" ? "strict" : "off";
+}
+
 export function resolveSettings(
   settings: DeepcodingSettings | null | undefined,
   defaults: { model: string; baseURL: string }
@@ -68,6 +77,9 @@ export function resolveSettings(
   const webSearchTool =
     typeof settings?.webSearchTool === "string" ? settings.webSearchTool.trim() : "";
   const provider = env.PROVIDER?.trim();
+  const providerPrivacyMode = resolveProviderPrivacyMode(
+    env.PROVIDER_PRIVACY?.trim() || env.providerPrivacyMode?.trim() || settings?.providerPrivacyMode
+  );
   const zdr = env.ZDR ? env.ZDR.trim().toLowerCase() === "true" : (settings?.zdr === true);
 
   return {
@@ -80,6 +92,7 @@ export function resolveSettings(
     notify: notify || undefined,
     webSearchTool: webSearchTool || undefined,
     provider: provider || undefined,
+    providerPrivacyMode,
     zdr: zdr || undefined
   };
 }

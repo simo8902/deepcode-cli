@@ -13,17 +13,14 @@ import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL } 
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { logApiError } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
-import {
-  sanitizeForModelPipeline,
-  sanitizeToolCallsForReplay
-} from "./privacy-guard";
+import type { ProviderPrivacyMode } from "./settings";
+import { sanitizeForProviderStrict } from "./privacy-guard";
 
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 const FINAL_HTTP_BODY_LOG_ENV = "DEEPCODE_LOG_FINAL_HTTP_BODY";
-const FINAL_HTTP_BODY_LOG_PATH = path.join(os.homedir(), ".deepcode", "logs", "final-http-body.jsonl");
 const require = createRequire(import.meta.url);
 const ejs = require("ejs") as {
   render: (template: string, data?: Record<string, unknown>) => string;
@@ -97,6 +94,17 @@ function getTotalTokens(usage: unknown | null | undefined): number {
   }
   const totalTokens = usage.total_tokens;
   return typeof totalTokens === "number" ? totalTokens : 0;
+}
+
+function isOpenRouterBaseURL(baseURL: string | undefined): boolean {
+  if (!baseURL) {
+    return false;
+  }
+  try {
+    return new URL(baseURL).hostname.toLowerCase() === "openrouter.ai";
+  } catch {
+    return baseURL.toLowerCase().includes("openrouter.ai");
+  }
 }
 
 export type SessionStatus =
@@ -278,7 +286,8 @@ export class SessionManager {
     request: Record<string, unknown>,
     options?: Record<string, unknown>,
     sessionId?: string,
-    debug?: ChatCompletionDebugOptions
+    debug?: ChatCompletionDebugOptions,
+    providerPrivacyMode: ProviderPrivacyMode = "off"
   ): Promise<{
     choices?: Array<{ message?: Record<string, unknown> }>;
     usage?: unknown;
@@ -300,9 +309,20 @@ export class SessionManager {
 
     let response: unknown;
     let outboundRequest: Record<string, unknown> = streamRequest;
+    let providerRedactedSensitiveContent = false;
     try {
-      outboundRequest = sanitizeForModelPipeline(streamRequest).value as Record<string, unknown>;
-      this.logFinalHttpBody(requestId, sessionId, outboundRequest);
+      if (providerPrivacyMode === "strict") {
+        const sanitized = sanitizeForProviderStrict(streamRequest);
+        outboundRequest = sanitized.value as Record<string, unknown>;
+        providerRedactedSensitiveContent = sanitized.redactedSensitiveContent;
+      }
+      this.logFinalHttpBody(
+        requestId,
+        sessionId,
+        outboundRequest,
+        providerPrivacyMode,
+        providerRedactedSensitiveContent
+      );
       response = await (client.chat.completions.create as unknown as (
         body: Record<string, unknown>,
         options?: Record<string, unknown>
@@ -364,6 +384,7 @@ export class SessionManager {
       type?: string;
       function?: { name?: string; arguments?: string };
     }>();
+    let lastToolCallIndex: number | null = null;
 
     const trackText = (value: unknown) => {
       if (typeof value !== "string" || value.length === 0) {
@@ -371,6 +392,43 @@ export class SessionManager {
       }
       estimatedTokens += this.estimateStreamTokens(value);
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "update", sessionId);
+    };
+
+    const getStreamToolCallIndex = (
+      rawToolCall: Record<string, unknown>,
+      fallbackIndex: number,
+      batchSize: number
+    ): number => {
+      if (typeof rawToolCall.index === "number" && Number.isFinite(rawToolCall.index)) {
+        lastToolCallIndex = rawToolCall.index;
+        return rawToolCall.index;
+      }
+
+      const id = rawToolCall.id;
+      if (typeof id === "string" && id) {
+        for (const [index, toolCall] of toolCallsByIndex.entries()) {
+          if (toolCall.id === id) {
+            lastToolCallIndex = index;
+            return index;
+          }
+        }
+        const index = toolCallsByIndex.size;
+        lastToolCallIndex = index;
+        return index;
+      }
+
+      if (batchSize > 1) {
+        lastToolCallIndex = fallbackIndex;
+        return fallbackIndex;
+      }
+
+      if (lastToolCallIndex != null && toolCallsByIndex.has(lastToolCallIndex)) {
+        return lastToolCallIndex;
+      }
+
+      const index = toolCallsByIndex.size;
+      lastToolCallIndex = index;
+      return index;
     };
 
     try {
@@ -408,11 +466,12 @@ export class SessionManager {
 
           const rawToolCalls = delta.tool_calls;
           if (Array.isArray(rawToolCalls)) {
-            for (const rawToolCall of rawToolCalls) {
+            for (let rawToolCallIndex = 0; rawToolCallIndex < rawToolCalls.length; rawToolCallIndex += 1) {
+              const rawToolCall = rawToolCalls[rawToolCallIndex];
               if (!isUsageRecord(rawToolCall)) {
                 continue;
               }
-              const index = typeof rawToolCall.index === "number" ? rawToolCall.index : toolCallsByIndex.size;
+              const index = getStreamToolCallIndex(rawToolCall, rawToolCallIndex, rawToolCalls.length);
               const current = toolCallsByIndex.get(index) ?? {};
               if (typeof rawToolCall.id === "string") {
                 current.id = rawToolCall.id;
@@ -516,21 +575,26 @@ export class SessionManager {
   private logFinalHttpBody(
     requestId: string,
     sessionId: string | undefined,
-    body: Record<string, unknown>
+    body: Record<string, unknown>,
+    providerPrivacyMode: ProviderPrivacyMode,
+    providerRedactedSensitiveContent: boolean
   ): void {
     if (process.env[FINAL_HTTP_BODY_LOG_ENV] !== "true") {
       return;
     }
 
     try {
-      fs.mkdirSync(path.dirname(FINAL_HTTP_BODY_LOG_PATH), { recursive: true });
+      const logPath = path.join(os.homedir(), ".deepcode", "logs", "final-http-body.jsonl");
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(
-        FINAL_HTTP_BODY_LOG_PATH,
+        logPath,
         JSON.stringify({
           timestamp: new Date().toISOString(),
           requestId,
           sessionId,
           boundary: "before client.chat.completions.create",
+          providerPrivacyMode,
+          providerRedactedSensitiveContent,
           body
         }) + "\n",
         "utf8"
@@ -563,7 +627,7 @@ The candidate skills are as follows:\n\n`;
     }
     systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
     
-    const { client, model, baseURL, debugLogEnabled } = this.createOpenAIClient();
+    const { client, model, baseURL, debugLogEnabled, providerPrivacyMode } = this.createOpenAIClient();
     if (!client) {
       return [];
     }
@@ -581,7 +645,7 @@ The candidate skills are as follows:\n\n`;
         location: "SessionManager.identifyMatchingSkillNames",
         baseURL,
         params: { purpose: "skill-matching" }
-      });
+      }, providerPrivacyMode);
       this.throwIfAborted(options?.signal);
       
       const rawContent = response.choices?.[0]?.message?.content;
@@ -971,7 +1035,18 @@ ${skillMd}
 
   async activateSession(sessionId: string, controller?: AbortController): Promise<void> {
     const startedAt = Date.now();
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, notify, provider, zdr } = this.createOpenAIClient();
+    const {
+      client,
+      model,
+      baseURL,
+      thinkingEnabled,
+      reasoningEffort,
+      debugLogEnabled,
+      notify,
+      provider,
+      providerPrivacyMode,
+      zdr
+    } = this.createOpenAIClient();
     const now = new Date().toISOString();
 
     if (!client) {
@@ -1039,6 +1114,9 @@ ${skillMd}
             model,
             messages,
             tools: getTools(this.getPromptToolOptions()),
+            ...(isOpenRouterBaseURL(baseURL)
+              ? { cache_control: { type: "ephemeral", ttl: "1h" } }
+              : {}),
             ...thinkingOptions
           },
           { signal: sessionController.signal },
@@ -1048,7 +1126,8 @@ ${skillMd}
             location: "SessionManager.activateSession",
             baseURL,
             params: { iteration, thinkingEnabled, reasoningEffort }
-          }
+          },
+          providerPrivacyMode
         );
 
         const message = response.choices?.[0]?.message;
@@ -1146,7 +1225,17 @@ ${skillMd}
 
   async compactSession(sessionId: string, signal?: AbortSignal): Promise<void> {
     this.throwIfAborted(signal);
-    const { client, model, baseURL, thinkingEnabled, reasoningEffort, debugLogEnabled, provider, zdr } = this.createOpenAIClient();
+    const {
+      client,
+      model,
+      baseURL,
+      thinkingEnabled,
+      reasoningEffort,
+      debugLogEnabled,
+      provider,
+      providerPrivacyMode,
+      zdr
+    } = this.createOpenAIClient();
     if (!client) {
       return;
     }
@@ -1185,7 +1274,7 @@ ${skillMd}
       location: "SessionManager.compactSession",
       baseURL,
       params: { thinkingEnabled, reasoningEffort }
-    });
+    }, providerPrivacyMode);
     this.throwIfAborted(signal);
     const rawLlmResponse = response.choices?.[0]?.message?.content;
     const llmResponse = typeof rawLlmResponse === "string" ? rawLlmResponse : "";
@@ -1695,15 +1784,11 @@ ${skillMd}
     }
     let waitingForUser = false;
     const followUpMessages: SessionMessage[] = [];
-    let redactedSensitiveOutput = false;
     for (const execution of toolExecutions) {
       if (execution.result.awaitUserResponse === true) {
         waitingForUser = true;
       }
-      if (execution.redactedSensitiveOutput === true) {
-        redactedSensitiveOutput = true;
-      }
-      const toolFunction = this.findSanitizedToolFunction(toolCalls, execution.toolCallId);
+      const toolFunction = this.findToolFunction(toolCalls, execution.toolCallId);
       const toolMessage = this.buildToolMessage(
         sessionId,
         execution.toolCallId,
@@ -1729,15 +1814,6 @@ ${skillMd}
 
     for (const followUpMessage of followUpMessages) {
       this.appendSessionMessage(sessionId, followUpMessage);
-    }
-    if (redactedSensitiveOutput) {
-      const warningMessage = this.buildAssistantMessage(
-        sessionId,
-        "Sensitive-looking material was found and redacted before model replay. Continuing with the sanitized output.",
-        null
-      );
-      this.appendSessionMessage(sessionId, warningMessage);
-      this.onAssistantMessage(warningMessage, true);
     }
     return { waitingForUser };
   }
@@ -1949,11 +2025,6 @@ ${skillMd}
       }
     }
     return null;
-  }
-
-  private findSanitizedToolFunction(toolCalls: unknown[], toolCallId: string): unknown | null {
-    const sanitizedToolCalls = sanitizeToolCallsForReplay(toolCalls);
-    return sanitizedToolCalls ? this.findToolFunction(sanitizedToolCalls, toolCallId) : null;
   }
 
   private buildToolParamsSnippet(toolFunction: unknown | null): string {

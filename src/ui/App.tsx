@@ -14,7 +14,12 @@ import {
   type SkillInfo,
   type UserPromptContent
 } from "../session";
-import { resolveSettings, type DeepcodingSettings, type ReasoningEffort } from "../settings";
+import {
+  resolveSettings,
+  type DeepcodingSettings,
+  type ProviderPrivacyMode,
+  type ReasoningEffort
+} from "../settings";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
 import { MessageView } from "./MessageView";
 import { SessionList } from "./SessionList";
@@ -443,6 +448,7 @@ export function createOpenAIClient(): {
   webSearchTool?: string;
   machineId?: string;
   provider?: string;
+  providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
 } {
   const settings = resolveCurrentSettings();
@@ -458,6 +464,7 @@ export function createOpenAIClient(): {
       webSearchTool: settings.webSearchTool,
       machineId: getMachineId(),
       provider: settings.provider,
+      providerPrivacyMode: settings.providerPrivacyMode,
       zdr: settings.zdr
     };
   }
@@ -481,6 +488,7 @@ export function createOpenAIClient(): {
     webSearchTool: settings.webSearchTool,
     machineId: getMachineId(),
     provider: settings.provider,
+    providerPrivacyMode: settings.providerPrivacyMode,
     zdr: settings.zdr
   };
 }

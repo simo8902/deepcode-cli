@@ -31,6 +31,38 @@ test("resolveSettings reads top-level thinkingEnabled, notify, and webSearchTool
   assert.equal(resolved.debugLogEnabled, true);
   assert.equal(resolved.notify, "/tmp/notify.sh");
   assert.equal(resolved.webSearchTool, "/tmp/web-search.sh");
+  assert.equal(resolved.providerPrivacyMode, "off");
+});
+
+test("resolveSettings enables strict provider privacy only when explicitly configured", () => {
+  assert.equal(
+    resolveSettings(
+      { providerPrivacyMode: "strict" },
+      { model: "default-model", baseURL: "https://default.example.com" }
+    ).providerPrivacyMode,
+    "strict"
+  );
+  assert.equal(
+    resolveSettings(
+      { env: { PROVIDER_PRIVACY: "strict" }, providerPrivacyMode: "off" },
+      { model: "default-model", baseURL: "https://default.example.com" }
+    ).providerPrivacyMode,
+    "strict"
+  );
+  assert.equal(
+    resolveSettings(
+      { env: { providerPrivacyMode: "strict" } },
+      { model: "default-model", baseURL: "https://default.example.com" }
+    ).providerPrivacyMode,
+    "strict"
+  );
+  assert.equal(
+    resolveSettings(
+      { env: { PROVIDER_PRIVACY: "anything-else" } },
+      { model: "default-model", baseURL: "https://default.example.com" }
+    ).providerPrivacyMode,
+    "off"
+  );
 });
 
 test("resolveSettings still accepts legacy env.THINKING and defaults reasoning effort when absent", () => {

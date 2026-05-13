@@ -27,11 +27,13 @@
     "typecheck": "tsc -p ./ --noEmit",
     "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\" --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
     "build": "npm run typecheck && npm run bundle && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "inspect:cache-log": "node scripts/inspect-final-http-body.mjs",
     "test": "tsx --test src/tests/*.test.ts",
     "test:single": "tsx --test",
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@hackylabs/deep-redact": "^3.0.5",
     "chalk": "^5.6.2",
     "ejs": "^5.0.2",
     "gradient-string": "^3.0.0",

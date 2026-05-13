@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   assertNoHighRiskSecretsForModel,
+  sanitizeForProviderStrict,
   sanitizeForModelPipeline,
   sanitizeToolCallsForReplay
 } from "../privacy-guard";
@@ -140,4 +141,42 @@ test("sanitizeForModelPipeline does not flag low-entropy placeholder strings", (
   assert.deepEqual(result.value, {
     output: `placeholder ${placeholder}`
   });
+});
+
+test("sanitizeForProviderStrict redacts credentials but preserves paths and ordinary code context", () => {
+  const result = sanitizeForProviderStrict({
+    messages: [
+      {
+        role: "tool",
+        content:
+          "file C:\\Users\\Simeon\\Documents\\repo\\main.cpp has token_count=42 " +
+          "and api_key=sk-or-abcdef1234567890"
+      },
+      {
+        role: "tool",
+        content:
+          "read /home/simeon/repo/src/main.cpp and password: local-test-value " +
+          "grep PRODUCTION_PASSWORD\\|Prod34126412"
+      },
+      {
+        role: "assistant",
+        content:
+          "#define PRODUCTION_PASSWORD !Prod34126412\n" +
+          "Babe... it's literally `!Prod34126412` wrapped in `PRODUCTION_PASSWORD`."
+      }
+    ]
+  });
+
+  assert.equal(result.redactedSensitiveContent, true);
+  const serialized = JSON.stringify(result.value);
+  assert.match(serialized, /C:\\\\Users\\\\Simeon\\\\Documents\\\\repo\\\\main\.cpp/);
+  assert.match(serialized, /\/home\/simeon\/repo\/src\/main\.cpp/);
+  assert.match(serialized, /token_count=42/);
+  assert.match(serialized, /PRODUCTION_PASSWORD/);
+  assert.doesNotMatch(serialized, /local-test-value/);
+  assert.doesNotMatch(serialized, /Prod34126412/);
+  assert.doesNotMatch(serialized, /!Prod/);
+  assert.doesNotMatch(serialized, /sk-or-/);
+  assert.match(serialized, /\[REDACTED_API_KEY\]/);
+  assert.match(serialized, /\[REDACTED_SECRET\]/);
 });
