@@ -2,20 +2,22 @@
 
 The system prompt in this codebase is heavily modified, please rewrite before use!
 
-Deep Code CLI is a heavily modified terminal AI coding agent for running DeepSeek and other OpenAI-compatible models through a stricter privacy layer.
-This fork is focused on company-code usage: reducing accidental leaks, sanitizing the final HTTP payload before it reaches a provider, and keeping provider routing explicit.
+Deep Code CLI is a heavily modified terminal AI coding agent for running DeepSeek and other OpenAI-compatible models.
+This fork is focused on company-code usage: preserving tool/cache correctness while optionally redacting sensitive values from the final HTTP payload before it reaches a provider.
 
 ## Security Model
 
-This CLI is designed to make accidental leakage harder, not impossible
-It protects the model request pipeline by scanning and sanitizing the JSON body that is actually sent upstream. That includes user messages, system messages, assistant reasoning fields, tool messages, and nested request fields
-It does not replace normal company security controls. You should still avoid pasting real production secrets, use provider ZDR when available, keep fallback routing disabled, and review final-boundary logs during hardening
+This CLI is designed to make accidental leakage harder, not impossible.
+The internal session state stays raw so tool calls, tool results, and prompt-cache replay keep working across requests.
+When `providerPrivacyMode` is set to `strict`, the CLI clones the final provider request body and redacts that clone immediately before it is sent upstream.
+It does not replace normal company security controls. You should still avoid pasting real production secrets, rotate exposed keys, use provider ZDR when available, keep fallback routing disabled for sensitive work, and review final-boundary logs during hardening.
 
 ## Privacy Controls
 
 ### Final Request Sanitization
 
-Before any request is sent to the model provider, the CLI builds a sanitized outbound request body.
+Strict provider privacy mode sanitizes only the outbound provider request body.
+It does not write redacted text back into session history, cache state, or tool results.
 
 The sanitizer redacts:
 
@@ -26,13 +28,14 @@ The sanitizer redacts:
 - GitHub tokens.
 - AWS access keys.
 - Unknown high-entropy secret-looking tokens.
-- Absolute local paths in model-replayed content.
+- Secret-looking values near keys such as `password`, `secret`, `token`, `api_key`, and `private_key`.
 
-High-risk secrets are blocked before send. Generic test credentials are redacted instead of failing the session.
+The strict sanitizer preserves file paths, tool call IDs, tool result structure, and ordinary code context so cached tool workflows can still replay correctly.
 
 ### Tool Output Protection
 
-Tool results are scanned before they become `tool` messages. If a tool output contains high-risk secret material, the CLI blocks automatic continuation and inserts a local warning instead of sending the raw result to the model.
+Tool results are stored raw inside the local session.
+With `providerPrivacyMode: "strict"`, sensitive values inside those tool results are redacted in the final provider-bound request clone before the model sees them.
 
 ### Sensitive File Reads
 
@@ -53,15 +56,19 @@ Example OpenRouter + DeepSeek configuration:
   "env": {
     "MODEL": "deepseek/deepseek-v4-pro",
     "BASE_URL": "https://openrouter.ai/api/v1",
-    "API_KEY": "sk-or-...",
+    "API_KEY": "sk-or-v1-REDACTED",
     "PROVIDER": "siliconflow",
     "ZDR": "true"
   },
+  "providerPrivacyMode": "strict",
   "debugLogEnabled": true,
   "thinkingEnabled": true,
   "reasoningEffort": "max"
 }
 ```
+
+`providerPrivacyMode` defaults to `off`.
+Use `strict` when the final provider payload must be scrubbed before it leaves the CLI.
 
 To explicitly allow sensitive reads:
 
@@ -94,7 +101,8 @@ Logs are written to:
 
 ## Important Notes
 
-- ZDR helps with provider retention, but it does not replace local redaction and blocking.
+- `providerPrivacyMode: "strict"` redacts the final provider request clone. It does not mutate local session history.
+- ZDR helps with provider retention, but it does not replace local redaction.
 - Provider fallback should stay disabled for company-code use.
 - Secret detection is regex and entropy based; it is strong but not perfect.
 - The model can still receive sanitized proprietary code and context.
