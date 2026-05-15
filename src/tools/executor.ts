@@ -1,5 +1,6 @@
 import type OpenAI from "openai";
-import type { ProviderPrivacyMode, ReasoningEffort } from "../settings";
+import type { DataCollection, ProviderPrivacyMode, ReasoningEffort } from "../settings";
+import { logWarn } from "../error-logger";
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
 import { handleBashTool } from "./bash-handler";
 import { handleEditTool } from "./edit-handler";
@@ -20,6 +21,7 @@ export type CreateOpenAIClient = () => {
   provider?: string;
   providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
+  dataCollection?: DataCollection;
 };
 
 export type ToolCall = {
@@ -89,9 +91,24 @@ export class ToolExecutor {
     toolCalls: unknown[],
     hooks?: ToolExecutionHooks
   ): Promise<ToolCallExecution[]> {
+    const seenIds = new Set<string>();
     const parsedCalls = toolCalls
       .map((toolCall) => this.parseToolCall(toolCall))
-      .filter((toolCall): toolCall is ToolCall => Boolean(toolCall));
+      .filter((toolCall): toolCall is ToolCall => {
+        if (!toolCall) return false;
+        if (seenIds.has(toolCall.id)) {
+          logWarn({
+            timestamp: new Date().toISOString(),
+            location: "ToolExecutor.executeToolCalls",
+            message: "Skipped duplicate tool_call_id before execution — would have produced duplicate tool result",
+            sessionId,
+            data: { duplicateToolCallId: toolCall.id, toolName: toolCall.function.name }
+          });
+          return false;
+        }
+        seenIds.add(toolCall.id);
+        return true;
+      });
 
     const executions: ToolCallExecution[] = [];
     for (const toolCall of parsedCalls) {

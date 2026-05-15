@@ -16,6 +16,7 @@ import {
 } from "../session";
 import {
   resolveSettings,
+  type DataCollection,
   type DeepcodingSettings,
   type ProviderPrivacyMode,
   type ReasoningEffort
@@ -450,6 +451,7 @@ export function createOpenAIClient(): {
   provider?: string;
   providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
+  dataCollection?: DataCollection;
 } {
   const settings = resolveCurrentSettings();
   if (!settings.apiKey) {
@@ -465,7 +467,8 @@ export function createOpenAIClient(): {
       machineId: getMachineId(),
       provider: settings.provider,
       providerPrivacyMode: settings.providerPrivacyMode,
-      zdr: settings.zdr
+      zdr: settings.zdr,
+      dataCollection: settings.dataCollection
     };
   }
 
@@ -489,7 +492,8 @@ export function createOpenAIClient(): {
     machineId: getMachineId(),
     provider: settings.provider,
     providerPrivacyMode: settings.providerPrivacyMode,
-    zdr: settings.zdr
+    zdr: settings.zdr,
+    dataCollection: settings.dataCollection
   };
 }
 

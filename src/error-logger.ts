@@ -4,10 +4,36 @@ import * as os from "os";
 
 const LOG_DIR = path.join(os.homedir(), ".deepcode", "logs");
 const ERROR_LOG_PATH = path.join(LOG_DIR, "error.log");
+const WARN_LOG_PATH = path.join(LOG_DIR, "warn.log");
 
 function ensureLogDir(): void {
   if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
+  }
+}
+
+export type WarnLogEntry = {
+  timestamp: string;
+  location: string;
+  message: string;
+  sessionId?: string;
+  data?: Record<string, unknown>;
+};
+
+export function logWarn(entry: WarnLogEntry): void {
+  try {
+    ensureLogDir();
+    const line = JSON.stringify(entry) + "\n";
+    fs.appendFileSync(WARN_LOG_PATH, line, "utf8");
+
+    const MAX_ENTRIES = 100;
+    const raw = fs.readFileSync(WARN_LOG_PATH, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    if (lines.length > MAX_ENTRIES) {
+      fs.writeFileSync(WARN_LOG_PATH, lines.slice(-MAX_ENTRIES).join("\n") + "\n", "utf8");
+    }
+  } catch {
+    // Never disrupt main flow
   }
 }
 

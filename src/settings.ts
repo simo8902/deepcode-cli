@@ -9,10 +9,12 @@ export type DeepcodingEnv = {
   PROVIDER_PRIVACY?: string;
   providerPrivacyMode?: string;
   ZDR?: string;
+  DATA_COLLECTION?: string;
 };
 
 export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
 export type ProviderPrivacyMode = "off" | "strict";
+export type DataCollection = "allow" | "deny";
 
 export type DeepcodingSettings = {
   env?: DeepcodingEnv;
@@ -23,6 +25,7 @@ export type DeepcodingSettings = {
   webSearchTool?: string;
   providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
+  dataCollection?: DataCollection;
 };
 
 export type ResolvedDeepcodingSettings = {
@@ -37,6 +40,7 @@ export type ResolvedDeepcodingSettings = {
   provider?: string;
   providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
+  dataCollection?: DataCollection;
 };
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort {
@@ -67,6 +71,12 @@ function resolveProviderPrivacyMode(value: unknown): ProviderPrivacyMode {
   return value === "strict" ? "strict" : "off";
 }
 
+function resolveDataCollection(value: unknown): DataCollection | undefined {
+  if (value === "deny") return "deny";
+  if (value === "allow") return "allow";
+  return undefined;
+}
+
 export function resolveSettings(
   settings: DeepcodingSettings | null | undefined,
   defaults: { model: string; baseURL: string }
@@ -81,6 +91,9 @@ export function resolveSettings(
     env.PROVIDER_PRIVACY?.trim() || env.providerPrivacyMode?.trim() || settings?.providerPrivacyMode
   );
   const zdr = env.ZDR ? env.ZDR.trim().toLowerCase() === "true" : (settings?.zdr === true);
+  const dataCollection = resolveDataCollection(
+    env.DATA_COLLECTION?.trim() || settings?.dataCollection
+  );
 
   return {
     apiKey: env.API_KEY?.trim(),
@@ -93,6 +106,7 @@ export function resolveSettings(
     webSearchTool: webSearchTool || undefined,
     provider: provider || undefined,
     providerPrivacyMode,
-    zdr: zdr || undefined
+    zdr: zdr || undefined,
+    dataCollection
   };
 }

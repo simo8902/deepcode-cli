@@ -1,4 +1,4 @@
-import type { ReasoningEffort } from "./settings";
+import type { DataCollection, ReasoningEffort } from "./settings";
 
 type ThinkingConfig = {
   type: "enabled" | "disabled";
@@ -7,6 +7,8 @@ type ThinkingConfig = {
 type ProviderOptions = {
   only?: string[];
   allow_fallbacks: boolean;
+  zdr?: boolean;
+  data_collection?: DataCollection;
 };
 
 type ThinkingRequestOptions = {
@@ -23,17 +25,25 @@ export function buildThinkingRequestOptions(
   baseURL?: string,
   reasoningEffort: ReasoningEffort = "xhigh",
   provider?: string,
-  _zdr?: boolean
+  zdr?: boolean,
+  dataCollection?: DataCollection
 ): ThinkingRequestOptions {
-  const providerOptions: ProviderOptions | undefined =
-    provider
-      ? {
-          only: [provider],
-          allow_fallbacks: false
-        }
-      : undefined;
+  const openRouter = isOpenRouterBaseURL(baseURL);
 
-  if (isOpenRouterBaseURL(baseURL)) {
+  // provider routing options (allow_fallbacks, zdr, data_collection) are
+  // OpenRouter-specific — sending them to other endpoints (e.g. api.deepseek.com)
+  // causes the API to return misleading 400 errors.
+  const hasProviderOptions = openRouter && (provider || zdr || dataCollection);
+  const providerOptions: ProviderOptions | undefined = hasProviderOptions
+    ? {
+        ...(provider ? { only: [provider] } : {}),
+        allow_fallbacks: false,
+        ...(zdr ? { zdr: true } : {}),
+        ...(dataCollection ? { data_collection: dataCollection } : {})
+      }
+    : undefined;
+
+  if (openRouter) {
     return {
       ...(thinkingEnabled ? { reasoning: { effort: reasoningEffort } } : {}),
       ...(providerOptions ? { provider: providerOptions } : {})
@@ -42,8 +52,7 @@ export function buildThinkingRequestOptions(
 
   return {
     thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
-    ...(thinkingEnabled ? { reasoning_effort: reasoningEffort } : {}),
-    ...(providerOptions ? { provider: providerOptions } : {})
+    ...(thinkingEnabled ? { reasoning_effort: reasoningEffort } : {})
   };
 }
 

@@ -11,7 +11,7 @@ import { buildThinkingRequestOptions } from "./openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
 import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
-import { logApiError } from "./error-logger";
+import { logApiError, logWarn } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
 import type { ProviderPrivacyMode } from "./settings";
 import { sanitizeForProviderStrict } from "./privacy-guard";
@@ -526,6 +526,29 @@ export class SessionManager {
       throw error;
     } finally {
       this.emitLlmStreamProgress(requestId, startedAt, estimatedTokens, "end", sessionId);
+    }
+
+    // Deduplicate by tool call ID after streaming completes.
+    // The provider may assign the same ID to two different index slots.
+    // Keep the first (lowest-index) entry for each ID and discard extras.
+    const seenStreamIds = new Map<string, number>();
+    for (const [slotIndex, toolCall] of toolCallsByIndex.entries()) {
+      const tcId = toolCall.id;
+      if (typeof tcId === "string" && tcId) {
+        const firstSlot = seenStreamIds.get(tcId);
+        if (firstSlot != null) {
+          logWarn({
+            timestamp: new Date().toISOString(),
+            location: "createChatCompletionStream:postStreamDedup",
+            message: "Provider produced duplicate tool_call_id across stream slots — dropped extra slot",
+            sessionId,
+            data: { duplicateId: tcId, keptSlot: firstSlot, droppedSlot: slotIndex }
+          });
+          toolCallsByIndex.delete(slotIndex);
+        } else {
+          seenStreamIds.set(tcId, slotIndex);
+        }
+      }
     }
 
     const toolCalls = Array.from(toolCallsByIndex.entries())
@@ -1045,7 +1068,8 @@ ${skillMd}
       notify,
       provider,
       providerPrivacyMode,
-      zdr
+      zdr,
+      dataCollection
     } = this.createOpenAIClient();
     const now = new Date().toISOString();
 
@@ -1106,17 +1130,14 @@ ${skillMd}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
-        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled);
-        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr);
+        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled, isOpenRouterBaseURL(baseURL));
+        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection);
         const response = await this.createChatCompletionStream(
           client,
           {
             model,
             messages,
             tools: getTools(this.getPromptToolOptions()),
-            ...(isOpenRouterBaseURL(baseURL)
-              ? { cache_control: { type: "ephemeral", ttl: "1h" } }
-              : {}),
             ...thinkingOptions
           },
           { signal: sessionController.signal },
@@ -1234,7 +1255,8 @@ ${skillMd}
       debugLogEnabled,
       provider,
       providerPrivacyMode,
-      zdr
+      zdr,
+      dataCollection
     } = this.createOpenAIClient();
     if (!client) {
       return;
@@ -1264,7 +1286,7 @@ ${skillMd}
     }
 
     const compactPrompt = getCompactPrompt(sessionMessages.slice(startIndex, endIndex));
-    const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr);
+    const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection);
     const response = await this.createChatCompletionStream(client, {
       model,
       messages: [{ role: "user", content: compactPrompt }],
@@ -1821,10 +1843,17 @@ ${skillMd}
   private buildOpenAIMessages(
     messages: SessionMessage[],
     thinkingEnabled: boolean,
+    addCacheControl: boolean = false
   ): ChatCompletionMessageParam[] {
     const activeMessages = messages.filter((message) => !message.compacted);
     const toolPairings = this.pairToolMessages(activeMessages);
     const openAIMessages: ChatCompletionMessageParam[] = [];
+    const emittedToolCallIds = new Set<string>();
+
+    const firstNonSystemIndex = activeMessages.findIndex((m) => m.role !== "system");
+    const lastSystemIndex = firstNonSystemIndex === -1
+      ? activeMessages.length - 1
+      : firstNonSystemIndex - 1;
 
     for (let index = 0; index < activeMessages.length; index += 1) {
       const message = activeMessages[index];
@@ -1832,7 +1861,46 @@ ${skillMd}
         continue;
       }
 
-      openAIMessages.push(this.sessionMessageToOpenAIMessage(message, thinkingEnabled));
+      const openAIMessage = this.sessionMessageToOpenAIMessage(message, thinkingEnabled);
+
+      if (addCacheControl && index === lastSystemIndex && message.role === "system") {
+        const text = typeof openAIMessage.content === "string" ? openAIMessage.content : "";
+        (openAIMessage as unknown as Record<string, unknown>).content = [
+          { type: "text", text, cache_control: { type: "ephemeral" } }
+        ];
+      }
+
+      // Deduplicate tool_calls within the assistant message itself.
+      // The provider can return two tool calls with the same id in one response,
+      // which causes a 400 from the API on the next turn.
+      if (message.role === "assistant") {
+        const rawCalls = (openAIMessage as { tool_calls?: unknown[] }).tool_calls;
+        if (Array.isArray(rawCalls) && rawCalls.length > 0) {
+          const seenTcIds = new Set<string>();
+          const dedupedCalls = rawCalls.filter((tc) => {
+            const id = tc && typeof tc === "object" ? (tc as { id?: unknown }).id : undefined;
+            if (typeof id !== "string" || !id) return true;
+            if (seenTcIds.has(id)) return false;
+            seenTcIds.add(id);
+            return true;
+          });
+          if (dedupedCalls.length < rawCalls.length) {
+            logWarn({
+              timestamp: new Date().toISOString(),
+              location: "buildOpenAIMessages",
+              message: "Removed duplicate tool_call ids from assistant message tool_calls before sending to API",
+              data: {
+                assistantMessageIndex: index,
+                originalCount: rawCalls.length,
+                dedupedCount: dedupedCalls.length
+              }
+            });
+            (openAIMessage as { tool_calls?: unknown[] }).tool_calls = dedupedCalls;
+          }
+        }
+      }
+
+      openAIMessages.push(openAIMessage);
 
       const toolCalls = this.getAssistantToolCalls(message);
       if (toolCalls.length === 0) {
@@ -1844,6 +1912,16 @@ ${skillMd}
         if (!toolCallId) {
           continue;
         }
+        if (emittedToolCallIds.has(toolCallId)) {
+          logWarn({
+            timestamp: new Date().toISOString(),
+            location: "buildOpenAIMessages",
+            message: "Skipped duplicate tool_call_id when building API request — would have caused 400",
+            data: { duplicateToolCallId: toolCallId, assistantMessageIndex: index, toolCallIndex }
+          });
+          continue;
+        }
+        emittedToolCallIds.add(toolCallId);
 
         const pairedToolIndex = toolPairings.get(this.buildToolPairingKey(index, toolCallIndex));
         if (pairedToolIndex != null) {
