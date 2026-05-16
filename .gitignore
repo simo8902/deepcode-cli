@@ -5,3 +5,6 @@ dist/
 .vscode/
 *.tgz
 *.log
+tools/
+.claude/
+.serena/

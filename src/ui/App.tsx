@@ -452,6 +452,7 @@ export function createOpenAIClient(): {
   providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
   dataCollection?: DataCollection;
+  cacheControl?: boolean;
 } {
   const settings = resolveCurrentSettings();
   if (!settings.apiKey) {
@@ -468,7 +469,8 @@ export function createOpenAIClient(): {
       provider: settings.provider,
       providerPrivacyMode: settings.providerPrivacyMode,
       zdr: settings.zdr,
-      dataCollection: settings.dataCollection
+      dataCollection: settings.dataCollection,
+      cacheControl: settings.cacheControl
     };
   }
 
@@ -493,7 +495,8 @@ export function createOpenAIClient(): {
     provider: settings.provider,
     providerPrivacyMode: settings.providerPrivacyMode,
     zdr: settings.zdr,
-    dataCollection: settings.dataCollection
+    dataCollection: settings.dataCollection,
+    cacheControl: settings.cacheControl
   };
 }
 

@@ -55,7 +55,6 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
 
     return (
       <Box marginLeft={1} marginBottom={1} flexGrow={1} gap={1} marginY={0}>
-        <Box><Text color="#229ac3">✦</Text></Box>
         <Box flexDirection="column" flexGrow={1}>
           {content ? <Text>{renderMarkdown(content)}</Text> : null}
         </Box>
@@ -99,6 +98,38 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   return null;
 }
 
+const SERENA_TOOL_LABELS: Record<string, string> = {
+  execute_shell_command: "Shell",
+  read_file: "Read",
+  create_text_file: "Write",
+  replace_content: "Edit",
+  list_dir: "List Dir",
+  find_file: "Find File",
+  search_for_pattern: "Search",
+  get_symbols_overview: "Symbols",
+  find_symbol: "Find Symbol",
+  find_referencing_symbols: "References",
+  find_implementations: "Implementations",
+  find_declaration: "Declaration",
+  get_diagnostics_for_file: "Diagnostics",
+  replace_symbol_body: "Replace Symbol",
+  insert_after_symbol: "Insert After",
+  insert_before_symbol: "Insert Before",
+  rename_symbol: "Rename Symbol",
+  safe_delete_symbol: "Delete Symbol",
+  list_memories: "Memories",
+  read_memory: "Read Memory",
+  write_memory: "Write Memory",
+  edit_memory: "Edit Memory",
+  delete_memory: "Delete Memory",
+  rename_memory: "Rename Memory",
+  initial_instructions: "Instructions",
+  check_onboarding_performed: "Onboarding Check",
+  onboarding: "Onboarding",
+};
+
+const SERENA_TOOLS = new Set(Object.keys(SERENA_TOOL_LABELS));
+
 function StatusLine({
   bulletColor,
   name,
@@ -108,11 +139,11 @@ function StatusLine({
   name: string;
   params: string;
 }): React.ReactElement {
+  const isSerena = SERENA_TOOLS.has(name);
   return (
     <Text wrap="truncate-end">
       {[
-        <Text key="bullet" color={bulletColor}>✧</Text>,
-        " ",
+        isSerena ? <Text key="badge" color="#f97316"> serena › </Text> : null,
         <Text key="name" bold>{name}</Text>,
         params ? <Text key="params" color="white">{`  ${params}`}</Text> : null
       ]}
@@ -122,6 +153,8 @@ function StatusLine({
 
 function formatToolStatusParams(summary: ToolSummary): string {
   const params = firstNonEmptyLine(summary.params);
+  // Never truncate Serena tool args — show the full call
+  if (SERENA_TOOLS.has(summary.name)) return params;
   return summary.name.toLowerCase() === "bash" ? params : truncate(params, 120);
 }
 
@@ -233,7 +266,8 @@ function parseToolPayload(
 }
 
 function getToolDiffPreviewLines(summary: ToolSummary): DiffPreviewLine[] {
-  if (!summary.ok || !["edit", "write"].includes(summary.name.toLowerCase())) {
+  const DIFF_TOOLS = new Set(["edit", "write", "replace_content", "create_text_file"]);
+  if (!summary.ok || !DIFF_TOOLS.has(summary.name.toLowerCase())) {
     return [];
   }
   const diffPreview = summary.metadata?.diff_preview;
@@ -287,7 +321,10 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function formatStatusName(value: string): string {
-  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : "Tool";
+  if (!value) return "Tool";
+  // Serena tools: show the raw tool name so the user sees exactly what was called
+  if (SERENA_TOOLS.has(value)) return value;
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
 function truncate(value: string, max: number): string {

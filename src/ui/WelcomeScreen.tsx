@@ -29,11 +29,11 @@ export function WelcomeScreen({
   return (
     <Box flexDirection="column" marginY={1} paddingX={1}>
       <Box>
-        <Text color={"#229ac3e6"}>{">"}_ Deep Code </Text>
-        <Text color="gray"> (v{version || "unknown"})</Text>
+        <Text color={"green"}>SIMEON's dev CLI</Text>
+        <Text> (v{version || "unknown"})</Text>
       </Box>
       <Text>
-        developed and <Text color="red">maintained by SIMO</Text>
+        developed and <Text color="green">maintained by SIMO</Text>
       </Text>
     </Box>
   );

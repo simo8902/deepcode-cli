@@ -2,11 +2,43 @@ import type OpenAI from "openai";
 import type { DataCollection, ProviderPrivacyMode, ReasoningEffort } from "../settings";
 import { logWarn } from "../error-logger";
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
-import { handleBashTool } from "./bash-handler";
-import { handleEditTool } from "./edit-handler";
-import { handleReadTool } from "./read-handler";
+import {
+  handleCheckOnboardingPerformedTool,
+  handleCreateTextFileTool,
+  handleDeleteLinesTool,
+  handleDeleteMemoryTool,
+  handleEditMemoryTool,
+  handleExecuteShellCommandTool,
+  handleFindDeclarationTool,
+  handleFindFileTool,
+  handleFindImplementationsTool,
+  handleFindReferencingSymbolsTool,
+  handleFindSymbolTool,
+  handleGetCurrentConfigTool,
+  handleGetDiagnosticsForFileTool,
+  handleGetDiagnosticsForSymbolTool,
+  handleGetSymbolsOverviewTool,
+  handleInitialInstructionsTool,
+  handleInsertAfterSymbolTool,
+  handleInsertAtLineTool,
+  handleInsertBeforeSymbolTool,
+  handleListDirTool,
+  handleListMemoriesTool,
+  handleOnboardingTool,
+  handleOpenDashboardTool,
+  handleReadFileTool,
+  handleReadMemoryTool,
+  handleRenameMemoryTool,
+  handleRenameSymbolTool,
+  handleReplaceContentTool,
+  handleReplaceLinesTool,
+  handleReplaceSymbolBodyTool,
+  handleRestartLanguageServerTool,
+  handleSafeDeleteSymbolTool,
+  handleSearchForPatternTool,
+  handleWriteMemoryTool,
+} from "./serena-handlers";
 import { handleWebSearchTool } from "./web-search-handler";
-import { handleWriteTool } from "./write-handler";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
@@ -22,6 +54,7 @@ export type CreateOpenAIClient = () => {
   providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
   dataCollection?: DataCollection;
+  cacheControl?: boolean;
 };
 
 export type ToolCall = {
@@ -129,10 +162,53 @@ export class ToolExecutor {
   }
 
   private registerToolHandlers(): void {
-    this.toolHandlers.set("bash", handleBashTool);
-    this.toolHandlers.set("read", handleReadTool);
-    this.toolHandlers.set("write", handleWriteTool);
-    this.toolHandlers.set("edit", handleEditTool);
+    // Serena — shell
+    this.toolHandlers.set("execute_shell_command", handleExecuteShellCommandTool);
+
+    // Serena — file tools
+    this.toolHandlers.set("read_file", handleReadFileTool);
+    this.toolHandlers.set("create_text_file", handleCreateTextFileTool);
+    this.toolHandlers.set("replace_content", handleReplaceContentTool);
+    this.toolHandlers.set("delete_lines", handleDeleteLinesTool);
+    this.toolHandlers.set("replace_lines", handleReplaceLinesTool);
+    this.toolHandlers.set("insert_at_line", handleInsertAtLineTool);
+    this.toolHandlers.set("list_dir", handleListDirTool);
+    this.toolHandlers.set("find_file", handleFindFileTool);
+    this.toolHandlers.set("search_for_pattern", handleSearchForPatternTool);
+
+    // Serena — symbol tools
+    this.toolHandlers.set("restart_language_server", handleRestartLanguageServerTool);
+    this.toolHandlers.set("get_symbols_overview", handleGetSymbolsOverviewTool);
+    this.toolHandlers.set("find_symbol", handleFindSymbolTool);
+    this.toolHandlers.set("find_referencing_symbols", handleFindReferencingSymbolsTool);
+    this.toolHandlers.set("find_implementations", handleFindImplementationsTool);
+    this.toolHandlers.set("find_declaration", handleFindDeclarationTool);
+    this.toolHandlers.set("get_diagnostics_for_file", handleGetDiagnosticsForFileTool);
+    this.toolHandlers.set("get_diagnostics_for_symbol", handleGetDiagnosticsForSymbolTool);
+    this.toolHandlers.set("replace_symbol_body", handleReplaceSymbolBodyTool);
+    this.toolHandlers.set("insert_after_symbol", handleInsertAfterSymbolTool);
+    this.toolHandlers.set("insert_before_symbol", handleInsertBeforeSymbolTool);
+    this.toolHandlers.set("rename_symbol", handleRenameSymbolTool);
+    this.toolHandlers.set("safe_delete_symbol", handleSafeDeleteSymbolTool);
+
+    // Serena — memory tools
+    this.toolHandlers.set("list_memories", handleListMemoriesTool);
+    this.toolHandlers.set("read_memory", handleReadMemoryTool);
+    this.toolHandlers.set("write_memory", handleWriteMemoryTool);
+    this.toolHandlers.set("edit_memory", handleEditMemoryTool);
+    this.toolHandlers.set("delete_memory", handleDeleteMemoryTool);
+    this.toolHandlers.set("rename_memory", handleRenameMemoryTool);
+
+    // Serena — workflow tools
+    this.toolHandlers.set("initial_instructions", handleInitialInstructionsTool);
+    this.toolHandlers.set("check_onboarding_performed", handleCheckOnboardingPerformedTool);
+    this.toolHandlers.set("onboarding", handleOnboardingTool);
+
+    // Serena — config tools
+    this.toolHandlers.set("open_dashboard", handleOpenDashboardTool);
+    this.toolHandlers.set("get_current_config", handleGetCurrentConfigTool);
+
+    // Non-Serena tools (kept as-is)
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
   }

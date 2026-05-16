@@ -1,8 +1,6 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./ui";
-import { setShellIfWindows } from "./tools/shell-utils";
-import { checkForNpmUpdate, promptForPendingUpdate, type PackageInfo } from "./updateCheck";
 
 const args = process.argv.slice(2);
 const packageInfo = readPackageInfo();
@@ -15,7 +13,7 @@ if (args.includes("--version") || args.includes("-v")) {
 if (args.includes("--help") || args.includes("-h")) {
   process.stdout.write(
     [
-      "deepcode - Deep Code CLI",
+      "deepcode - Deep Shit CLI",
       "",
       "Usage:",
       "  deepcode               Launch the interactive TUI in the current directory",
@@ -49,7 +47,6 @@ if (args.includes("--help") || args.includes("-h")) {
 }
 
 const projectRoot = process.cwd();
-configureWindowsShell();
 
 if (!process.stdin.isTTY) {
   process.stderr.write(
@@ -59,63 +56,41 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
-void main();
+const restartRef: { current: (() => void) | null } = { current: null };
 
-async function main(): Promise<void> {
-  const updatePromptResult = await promptForPendingUpdate(packageInfo);
+function startApp(): void {
+  const inkInstance = render(
+    <App
+      projectRoot={projectRoot}
+      version={packageInfo.version}
+      onRestart={() => restartRef.current?.()}
+    />,
+    { exitOnCtrlC: false }
+  );
 
-  const restartRef: { current: (() => void) | null } = { current: null };
+  restartRef.current = () => {
+    process.stdout.write("[2J[3J[H");
+    inkInstance.unmount();
+    startApp();
+  };
 
-  function startApp(): void {
-    const inkInstance = render(
-      <App
-        projectRoot={projectRoot}
-        version={packageInfo.version}
-        onRestart={() => restartRef.current?.()}
-      />,
-      { exitOnCtrlC: false }
-    );
-
-    restartRef.current = () => {
-      process.stdout.write("\u001B[2J\u001B[3J\u001B[H");
-      inkInstance.unmount();
-      startApp();
-    };
-
-    inkInstance.waitUntilExit().then(() => {
-      if (!restartRef.current) {
-        process.exit(0);
-      }
-    });
-  }
-
-  if (!updatePromptResult.installed) {
-    void checkForNpmUpdate(packageInfo);
-  }
-
-  startApp();
+  inkInstance.waitUntilExit().then(() => {
+    if (!restartRef.current) {
+      process.exit(0);
+    }
+  });
 }
 
-function configureWindowsShell(): void {
-  process.env.NoDefaultCurrentDirectoryInExePath = "1";
-  try {
-    setShellIfWindows();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`deepcode: ${message}\n`);
-    process.exit(1);
-  }
-}
+startApp();
 
-function readPackageInfo(): PackageInfo {
+function readPackageInfo(): { name: string; version: string } {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const pkg = require("../package.json") as { name?: unknown; version?: unknown };
     return {
-      name: typeof pkg.name === "string" ? pkg.name : "@vegamo/deepcode-cli",
+      name: typeof pkg.name === "string" ? pkg.name : "simo/deepshit-cli",
       version: typeof pkg.version === "string" ? pkg.version : ""
     };
   } catch {
-    return { name: "@vegamo/deepcode-cli", version: "" };
+    return { name: "simo/deepshit-cli", version: "" };
   }
 }

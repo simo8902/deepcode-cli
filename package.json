@@ -1,16 +1,15 @@
 {
-  "name": "@vegamo/deepcode-cli",
-  "version": "0.1.20",
-  "description": "Deep Code CLI - Vibe coding for the deepseek-v4 model in your terminal",
+  "name": "deepshit-cli",
+  "version": "0.1.21",
+  "description": "Deep SHIT CLI for local dev with annoying self awareness and privacy protection like an fuc.king N*SA",
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lessweb/deepcode-cli.git"
+    "url": "https://github.com/simo8902/deepcode-cli.git"
   },
-  "homepage": "https://deepcode.vegamo.cn",
   "bin": {
-    "deepcode": "./dist/cli.js"
+    "deepshit": "./dist/cli.js"
   },
   "main": "./dist/cli.js",
   "files": [
@@ -21,16 +20,16 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=18.17.0"
+    "bun": ">=1.0.0"
   },
   "scripts": {
     "typecheck": "tsc -p ./ --noEmit",
     "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\" --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
-    "build": "npm run typecheck && npm run bundle && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "inspect:cache-log": "node scripts/inspect-final-http-body.mjs",
-    "test": "tsx --test src/tests/*.test.ts",
-    "test:single": "tsx --test",
-    "prepack": "npm run build"
+    "build": "bun run typecheck && bun run bundle && bun -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "inspect:cache-log": "bun run scripts/inspect-final-http-body.mjs",
+    "test": "bun test src/tests/*.test.ts",
+    "test:single": "bun test",
+    "prepack": "bun run build"
   },
   "dependencies": {
     "@hackylabs/deep-redact": "^3.0.5",

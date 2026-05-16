@@ -1069,7 +1069,8 @@ ${skillMd}
       provider,
       providerPrivacyMode,
       zdr,
-      dataCollection
+      dataCollection,
+      cacheControl
     } = this.createOpenAIClient();
     const now = new Date().toISOString();
 
@@ -1130,7 +1131,7 @@ ${skillMd}
           await this.compactSession(sessionId, sessionController.signal);
         }
 
-        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled, isOpenRouterBaseURL(baseURL));
+        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled, isOpenRouterBaseURL(baseURL) || cacheControl === true);
         const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection);
         const response = await this.createChatCompletionStream(
           client,
@@ -1840,6 +1841,17 @@ ${skillMd}
     return { waitingForUser };
   }
 
+  private applyMessageCacheControl(message: ChatCompletionMessageParam): void {
+    const raw = message as unknown as Record<string, unknown>;
+    const content = raw.content;
+    if (typeof content === "string") {
+      raw.content = [{ type: "text", text: content, cache_control: { type: "ephemeral" } }];
+    } else if (Array.isArray(content) && content.length > 0) {
+      const last = content[content.length - 1] as Record<string, unknown>;
+      last.cache_control = { type: "ephemeral" };
+    }
+  }
+
   private buildOpenAIMessages(
     messages: SessionMessage[],
     thinkingEnabled: boolean,
@@ -1850,11 +1862,6 @@ ${skillMd}
     const openAIMessages: ChatCompletionMessageParam[] = [];
     const emittedToolCallIds = new Set<string>();
 
-    const firstNonSystemIndex = activeMessages.findIndex((m) => m.role !== "system");
-    const lastSystemIndex = firstNonSystemIndex === -1
-      ? activeMessages.length - 1
-      : firstNonSystemIndex - 1;
-
     for (let index = 0; index < activeMessages.length; index += 1) {
       const message = activeMessages[index];
       if (message.role === "tool") {
@@ -1862,13 +1869,6 @@ ${skillMd}
       }
 
       const openAIMessage = this.sessionMessageToOpenAIMessage(message, thinkingEnabled);
-
-      if (addCacheControl && index === lastSystemIndex && message.role === "system") {
-        const text = typeof openAIMessage.content === "string" ? openAIMessage.content : "";
-        (openAIMessage as unknown as Record<string, unknown>).content = [
-          { type: "text", text, cache_control: { type: "ephemeral" } }
-        ];
-      }
 
       // Deduplicate tool_calls within the assistant message itself.
       // The provider can return two tool calls with the same id in one response,
@@ -1930,6 +1930,35 @@ ${skillMd}
         }
 
         openAIMessages.push(this.buildInterruptedOpenAIToolMessage(toolCalls, toolCallId));
+      }
+    }
+
+    if (addCacheControl) {
+      // Breakpoint 1: last system message — caches the static system prompt prefix.
+      for (let i = openAIMessages.length - 1; i >= 0; i -= 1) {
+        if (openAIMessages[i].role === "system") {
+          this.applyMessageCacheControl(openAIMessages[i]);
+          break;
+        }
+      }
+
+      // Breakpoint 2: last tool message before the current user turn — caches
+      // the stable context (e.g. codebase indexing results) so follow-up
+      // questions don't re-process that large block at full cost.
+      let lastUserIdx = -1;
+      for (let i = openAIMessages.length - 1; i >= 0; i -= 1) {
+        if (openAIMessages[i].role === "user") {
+          lastUserIdx = i;
+          break;
+        }
+      }
+      if (lastUserIdx > 0) {
+        for (let i = lastUserIdx - 1; i >= 0; i -= 1) {
+          if (openAIMessages[i].role === "tool") {
+            this.applyMessageCacheControl(openAIMessages[i]);
+            break;
+          }
+        }
       }
     }
 
@@ -2133,31 +2162,30 @@ ${skillMd}
   }
 
   private formatToolParamsSnippet(toolName: string | null, args: Record<string, unknown>): string {
+    // For legacy non-Serena tools keep old behaviour
     if (toolName === "bash") {
-      const command = typeof args.command === "string" ? args.command.trim() : "";
-      const description = typeof args.description === "string" ? args.description.trim() : "";
-      if (command && description) {
-        return `${command}  # ${description}`;
-      }
-      if (command) {
-        return command;
-      }
-      if (description) {
-        return description;
-      }
+      const cmd = typeof args.command === "string" ? args.command.trim() : "";
+      const desc = typeof args.description === "string" ? args.description.trim() : "";
+      return cmd && desc ? `${cmd}  # ${desc}` : cmd || desc;
+    }
+    if (toolName === "read" || toolName === "write" || toolName === "edit") {
+      const firstKey = Object.keys(args)[0];
+      if (!firstKey) return "";
+      const value = args[firstKey];
+      return typeof value === "string" ? value : JSON.stringify(value);
     }
 
-    const firstKey = Object.keys(args)[0];
-    if (!firstKey) {
-      return "";
+    // Serena tools: show every argument as key=value so the user sees the full call
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(args)) {
+      if (value === undefined || value === null || value === "" || value === false) continue;
+      if (typeof value === "string") {
+        parts.push(`${key}=${value}`);
+      } else {
+        parts.push(`${key}=${JSON.stringify(value)}`);
+      }
     }
-
-    const value = args[firstKey];
-    const text = typeof value === "string" ? value : JSON.stringify(value);
-    if (toolName === "read" && text.startsWith(this.projectRoot)) {
-      return text.slice(this.projectRoot.length).replace(/^[\\/]/, "");
-    }
-    return text;
+    return parts.join("  ");
   }
 
   private buildToolResultSnippet(content: string): string {

@@ -26,6 +26,7 @@ export type DeepcodingSettings = {
   providerPrivacyMode?: ProviderPrivacyMode;
   zdr?: boolean;
   dataCollection?: DataCollection;
+  cacheControl?: boolean;
 };
 
 export type ResolvedDeepcodingSettings = {
@@ -41,6 +42,7 @@ export type ResolvedDeepcodingSettings = {
   providerPrivacyMode: ProviderPrivacyMode;
   zdr?: boolean;
   dataCollection?: DataCollection;
+  cacheControl?: boolean;
 };
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort {
@@ -107,6 +109,7 @@ export function resolveSettings(
     provider: provider || undefined,
     providerPrivacyMode,
     zdr: zdr || undefined,
-    dataCollection
+    dataCollection,
+    cacheControl: settings?.cacheControl === true ? true : undefined
   };
 }

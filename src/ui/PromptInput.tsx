@@ -114,7 +114,7 @@ export const PromptInput = React.memo(function PromptInput({
       ? loadingText && loadingText.trim()
         ? loadingText
         : "esc to interrupt · ctrl+c to cancel input"
-      : "enter send · shift+enter newline · ctrl+v image · / commands · ctrl+d exit";
+      : "";
   useTerminalFocusReporting(stdout, !disabled);
   useHiddenTerminalCursor(stdout, !disabled);
 

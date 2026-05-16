@@ -2,7 +2,6 @@ import { execFileSync, execSync } from "child_process";
 import * as os from "os";
 import * as path from "path";
 import type { SessionMessage } from "./session";
-import { findGitBashPath } from "./tools/shell-utils";
 
 export const AGENT_DRIFT_GUARD_SKILL = `
 ---
@@ -293,7 +292,17 @@ const TOOL_USAGE_GUIDANCE = `# Tool Usage
 
 All provided tools are available for use. Choose any available tool when it helps complete the user's request, inspect the workspace, verify behavior, or gather needed context. Never read obvious secret-bearing files unless the user explicitly asks and the environment has enabled sensitive reads.
 
-Available tool schemas are provided separately in the API request.`;
+Available tool schemas are provided separately in the API request.
+
+# Session Startup
+
+At the very start of every session, before responding to the user's first message, run this sequence:
+1. Call \`check_onboarding_performed\` to check if project onboarding has already been done.
+2. If onboarding has NOT been performed:
+   a. Use \`AskUserQuestion\` to ask the user which language(s) the project uses. Allow free-text via "Other".
+   b. Map the answer to the appropriate Serena language keys, then rewrite the \`languages\` field in \`.serena/project.yml\` using \`replace_content\`. If the user says none, set \`languages: []\`.
+   c. Then call \`onboarding\`.
+3. Do not mention this startup sequence to the user unless it fails.`;
 
 export function getSystemPrompt(projectRoot: string, options: PromptToolOptions = {}, agentInstructions?: string): string {
   void options;
@@ -349,23 +358,14 @@ function getRuntimeContext(projectRoot: string): string {
 function checkToolInstalled(tool: string): boolean {
   try {
     if (process.platform === "win32") {
-      const bashPath = findGitBashPath();
-      execFileSync(bashPath, ["-lc", `command -v ${shellSingleQuote(tool)}`], {
-        encoding: "utf8",
-        stdio: "ignore",
-        windowsHide: true
-      });
-      return true;
+      execFileSync("where.exe", [tool], { encoding: "utf8", stdio: "ignore", windowsHide: true });
+    } else {
+      execSync(`command -v ${tool}`, { encoding: "utf8", stdio: "ignore" });
     }
-    execSync(`command -v ${tool}`, { encoding: "utf8", stdio: "ignore" });
     return true;
   } catch {
     return false;
   }
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
 function getRuntimeVersionInfo(): Record<string, string> {
@@ -385,27 +385,17 @@ function getRuntimeVersionInfo(): Record<string, string> {
 
 function getCommandVersion(command: string, args: string[]): string | null {
   try {
-    const commandText = [command, ...args].map(shellSingleQuote).join(" ");
-    if (process.platform === "win32") {
-      return execFileSync(findGitBashPath(), ["-lc", `${commandText} 2>&1`], {
-        encoding: "utf8",
-        windowsHide: true
-      }).trim();
-    }
-    return execSync(`${commandText} 2>&1`, { encoding: "utf8" }).trim();
+    return execFileSync(command, args, { encoding: "utf8", windowsHide: true }).trim();
   } catch {
     return null;
   }
 }
 
 function getUnameInfo(): string {
+  if (process.platform === "win32") {
+    return `${os.type()} ${os.release()} ${os.arch()}`;
+  }
   try {
-    if (process.platform === "win32") {
-      return execFileSync(findGitBashPath(), ["-lc", "uname -a"], {
-        encoding: "utf8",
-        windowsHide: true
-      }).trim();
-    }
     return execSync("uname -a", { encoding: "utf8" }).trim();
   } catch {
     return `${os.type()} ${os.release()} ${os.arch()}`;
@@ -427,23 +417,29 @@ export type ToolDefinition = {
 };
 
 export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
+  void options;
   const tools: ToolDefinition[] = [
+
+    // ── Serena: shell ────────────────────────────────────────────────────────
     {
       type: "function",
       function: {
-        name: "bash",
-        description: "Execute shell commands in a persistent bash session.",
+        name: "execute_shell_command",
+        description:
+          "Execute a shell command and return its output. " +
+          "The working directory defaults to the project root. " +
+          "Do not use for long-running or interactive processes.",
         parameters: {
           type: "object",
           properties: {
             command: {
               type: "string",
-              description: "The shell command to execute",
+              description: "Shell command to execute.",
             },
-            description: {
+            cwd: {
               type: "string",
               description:
-                'Clear, concise description of what this command does in active voice. Never use words like "complex" or "risk" in the description - just describe what it does.',
+                "Working directory (relative path from project root, or absolute). Defaults to project root.",
             },
           },
           required: ["command"],
@@ -451,48 +447,892 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         },
       },
     },
+
+    // ── Serena: file tools ────────────────────────────────────────────────────
+    {
+      type: "function",
+      function: {
+        name: "read_file",
+        description:
+          "Read a file (or a slice of it) within the project directory. " +
+          "Use get_symbols_overview first when you need a structural overview.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            start_line: {
+              type: "number",
+              description: "0-based index of the first line to retrieve. Defaults to 0.",
+            },
+            end_line: {
+              type: "number",
+              description: "0-based index of the last line (inclusive). Omit to read until end of file.",
+            },
+          },
+          required: ["relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "create_text_file",
+        description:
+          "Create or overwrite a text file in the project directory. " +
+          "Prefer replace_content or symbol-level tools for targeted edits to existing files.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            content: {
+              type: "string",
+              description: "Complete file content to write.",
+            },
+          },
+          required: ["relative_path", "content"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "replace_content",
+        description:
+          "Replace content in a file using a literal string or regex pattern. " +
+          "Preferred for file-level edits when symbol-level tools are not appropriate. " +
+          "Use mode='regex' with wildcards (e.g. 'start.*?end') to avoid specifying large verbatim blocks.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            needle: {
+              type: "string",
+              description: "String or regex pattern to search for.",
+            },
+            repl: {
+              type: "string",
+              description:
+                "Replacement string. In regex mode supports backreferences as $!1, $!2, etc.",
+            },
+            mode: {
+              type: "string",
+              enum: ["literal", "regex"],
+              description: "Whether needle is treated as a literal string or a regex (Python re, DOTALL+MULTILINE).",
+            },
+            allow_multiple_occurrences: {
+              type: "boolean",
+              description: "Whether to allow replacing multiple occurrences. Defaults to false.",
+            },
+          },
+          required: ["relative_path", "needle", "repl", "mode"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_lines",
+        description:
+          "Delete a range of lines from a file. " +
+          "Requires reading the same range first with read_file to verify correctness. " +
+          "Prefer symbol-level tools when editing a named symbol.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            start_line: {
+              type: "number",
+              description: "0-based index of the first line to delete.",
+            },
+            end_line: {
+              type: "number",
+              description: "0-based index of the last line to delete (inclusive).",
+            },
+          },
+          required: ["relative_path", "start_line", "end_line"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "replace_lines",
+        description:
+          "Replace a range of lines in a file with new content. " +
+          "Requires reading the same range first with read_file to verify correctness. " +
+          "Prefer symbol-level tools when editing a named symbol.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            start_line: {
+              type: "number",
+              description: "0-based index of the first line to replace.",
+            },
+            end_line: {
+              type: "number",
+              description: "0-based index of the last line to replace (inclusive).",
+            },
+            content: {
+              type: "string",
+              description: "New content to insert in place of the deleted lines.",
+            },
+          },
+          required: ["relative_path", "start_line", "end_line", "content"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "insert_at_line",
+        description:
+          "Insert content at a specific line in a file, pushing the existing line down. " +
+          "Useful for small targeted edits inside a long symbol body. " +
+          "Prefer insert_after_symbol or insert_before_symbol when the target is a named symbol.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            line: {
+              type: "number",
+              description: "0-based index of the line to insert content at.",
+            },
+            content: {
+              type: "string",
+              description: "Content to insert.",
+            },
+          },
+          required: ["relative_path", "line", "content"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_dir",
+        description: "List files and directories in a given project directory.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the directory. Use '.' to list the project root.",
+            },
+            recursive: {
+              type: "boolean",
+              description: "Whether to scan subdirectories recursively.",
+            },
+            skip_ignored_files: {
+              type: "boolean",
+              description: "Whether to skip gitignored files and directories.",
+            },
+          },
+          required: ["relative_path", "recursive"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "find_file",
+        description:
+          "Find files matching a filename pattern (glob) within the project directory.",
+        parameters: {
+          type: "object",
+          properties: {
+            file_mask: {
+              type: "string",
+              description: "Filename or file mask (supports * and ? wildcards), e.g. '*.ts' or 'index.*'.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Directory to search in. Use '.' for the project root.",
+            },
+          },
+          required: ["file_mask", "relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_for_pattern",
+        description:
+          "Search for a regex pattern across project files. " +
+          "Prefer symbolic tools when you know which symbol you are looking for.",
+        parameters: {
+          type: "object",
+          properties: {
+            substring_pattern: {
+              type: "string",
+              description:
+                "Regex pattern to search for (Python re, DOTALL enabled). " +
+                "Avoid .* at start/end; use .*? in the middle for non-greedy multi-line matches.",
+            },
+            context_lines_before: {
+              type: "number",
+              description: "Lines of context to include before each match. Defaults to 0.",
+            },
+            context_lines_after: {
+              type: "number",
+              description: "Lines of context to include after each match. Defaults to 0.",
+            },
+            paths_include_glob: {
+              type: "string",
+              description: "Glob pattern for files to include (e.g. 'src/**/*.ts'). Empty means all non-ignored files.",
+            },
+            paths_exclude_glob: {
+              type: "string",
+              description: "Glob pattern for files to exclude (e.g. '**/*.test.ts').",
+            },
+            relative_path: {
+              type: "string",
+              description: "Restrict search to this subdirectory (relative path). Empty means entire project.",
+            },
+            restrict_search_to_code_files: {
+              type: "boolean",
+              description: "If true, only search files recognized as code (not docs, configs, etc.). Defaults to false.",
+            },
+          },
+          required: ["substring_pattern"],
+          additionalProperties: false,
+        },
+      },
+    },
+
+    // ── Serena: symbol tools ──────────────────────────────────────────────────
+    {
+      type: "function",
+      function: {
+        name: "restart_language_server",
+        description:
+          "Restart the language server(s). Use only on explicit user request or after confirmation " +
+          "that the language server is hanging or producing incorrect results.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_symbols_overview",
+        description:
+          "Get an overview of the top-level symbols (classes, functions, etc.) defined in a file. " +
+          "Call this first when exploring a new file before reading the full content.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            depth: {
+              type: "number",
+              description: "Depth of descendants to retrieve (0 = top-level only, 1 = immediate children). Defaults to 0.",
+            },
+          },
+          required: ["relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "find_symbol",
+        description:
+          "Find symbols (classes, methods, functions, etc.) by name path pattern across the codebase. " +
+          "A name path is like 'MyClass/my_method'. Supports simple names, relative paths, and absolute paths (prefix '/').",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path_pattern: {
+              type: "string",
+              description:
+                "Name path pattern to match. Examples: 'handleBashTool', 'ToolExecutor/executeToolCall', '/ToolExecutor/registerToolHandlers'.",
+            },
+            depth: {
+              type: "number",
+              description: "Depth of descendants to retrieve. Defaults to 0.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Restrict search to this file or directory (relative path). Empty means entire codebase.",
+            },
+            include_body: {
+              type: "boolean",
+              description: "Whether to include the symbol's source code body. Use judiciously. Defaults to false.",
+            },
+            substring_matching: {
+              type: "boolean",
+              description: "If true, the last element of the pattern uses substring matching. Defaults to false.",
+            },
+            max_matches: {
+              type: "number",
+              description: "Maximum number of matches to return. -1 means no limit. Use 1 when searching for a unique symbol.",
+            },
+          },
+          required: ["name_path_pattern"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "find_referencing_symbols",
+        description:
+          "Find all symbols that reference (call, import, or use) a given symbol. " +
+          "Returns referencing symbol metadata and a code snippet around each reference.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol to find references for.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+          },
+          required: ["name_path", "relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "find_implementations",
+        description: "Find symbols that implement a given interface or abstract symbol.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol to find implementations for.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+          },
+          required: ["name_path", "relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "find_declaration",
+        description:
+          "Find the declaration/definition of a symbol referenced at a specific location in code. " +
+          "Provide a regex that matches the usage site.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the source file containing the usage.",
+            },
+            regex: {
+              type: "string",
+              description:
+                "Python regex with one capturing group around the symbol name at the usage site. " +
+                "Example: 'obj\\\\.(process)\\\\(' to look up 'process' in 'obj.process('.",
+            },
+            include_body: {
+              type: "boolean",
+              description: "Whether to include the declaration's source body. Defaults to false.",
+            },
+          },
+          required: ["relative_path", "regex"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_diagnostics_for_file",
+        description:
+          "Get language-server diagnostics (errors, warnings, hints) for a file, " +
+          "grouped by severity and containing symbol.",
+        parameters: {
+          type: "object",
+          properties: {
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file from the project root.",
+            },
+            start_line: {
+              type: "number",
+              description: "0-based first line to include. Defaults to 0.",
+            },
+            end_line: {
+              type: "number",
+              description: "0-based last line to include. -1 means end of file. Defaults to -1.",
+            },
+            min_severity: {
+              type: "number",
+              description: "Minimum LSP severity: 1=Error, 2=Warning, 3=Info, 4=Hint. Defaults to 4.",
+            },
+          },
+          required: ["relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_diagnostics_for_symbol",
+        description:
+          "Get language-server diagnostics for a specific symbol and optionally for all symbols that reference it. " +
+          "Useful for checking whether a change introduced errors without scanning the entire file.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol to inspect (e.g. 'MyClass/my_method').",
+            },
+            reference_file: {
+              type: "string",
+              description: "Optional file path to disambiguate the symbol when multiple matches exist.",
+            },
+            check_symbol_references: {
+              type: "boolean",
+              description: "If true, also collect diagnostics for all symbols that reference this one. Defaults to false.",
+            },
+            min_severity: {
+              type: "number",
+              description: "Minimum LSP severity: 1=Error, 2=Warning, 3=Info, 4=Hint. Defaults to 4.",
+            },
+          },
+          required: ["name_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "replace_symbol_body",
+        description:
+          "Replace the complete definition (body) of a symbol. " +
+          "Only use after retrieving the symbol with include_body=true so you know the current body.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol whose body to replace.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+            body: {
+              type: "string",
+              description:
+                "New symbol body including the signature line and any annotations. " +
+                "Preserves surrounding code — only the symbol definition is replaced.",
+            },
+          },
+          required: ["name_path", "relative_path", "body"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "insert_after_symbol",
+        description:
+          "Insert code after the end of a symbol's definition (e.g. add a new method after a class method). " +
+          "Do not use for assignments or constants.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol after which to insert content.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+            body: {
+              type: "string",
+              description: "Content to insert. Should begin on the next line after the symbol.",
+            },
+          },
+          required: ["name_path", "relative_path", "body"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "insert_before_symbol",
+        description:
+          "Insert code before the beginning of a symbol's definition " +
+          "(e.g. add a new import, class, function, or field).",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol before which to insert content.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+            body: {
+              type: "string",
+              description: "Content to insert before the symbol's definition line.",
+            },
+          },
+          required: ["name_path", "relative_path", "body"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "rename_symbol",
+        description:
+          "Rename a symbol throughout the entire codebase using language-server refactoring.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path: {
+              type: "string",
+              description: "Name path of the symbol to rename.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+            new_name: {
+              type: "string",
+              description: "New name for the symbol.",
+            },
+          },
+          required: ["name_path", "relative_path", "new_name"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "safe_delete_symbol",
+        description:
+          "Delete a symbol if it has no references; otherwise return a list of its references. " +
+          "Safer than direct file editing for symbol removal.",
+        parameters: {
+          type: "object",
+          properties: {
+            name_path_pattern: {
+              type: "string",
+              description: "Name path of the symbol to delete.",
+            },
+            relative_path: {
+              type: "string",
+              description: "Relative path to the file containing the symbol.",
+            },
+          },
+          required: ["name_path_pattern", "relative_path"],
+          additionalProperties: false,
+        },
+      },
+    },
+
+    // ── Serena: memory tools ──────────────────────────────────────────────────
+    {
+      type: "function",
+      function: {
+        name: "list_memories",
+        description: "List available project memories. Memories can be read with read_memory.",
+        parameters: {
+          type: "object",
+          properties: {
+            topic: {
+              type: "string",
+              description: "Optional topic filter (e.g. 'auth'). Empty means all memories.",
+            },
+          },
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "read_memory",
+        description:
+          "Read the content of a project memory file. Only read memories relevant to the current task.",
+        parameters: {
+          type: "object",
+          properties: {
+            memory_name: {
+              type: "string",
+              description: "Name of the memory to read (as returned by list_memories).",
+            },
+          },
+          required: ["memory_name"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "write_memory",
+        description:
+          "Save project information as a named memory for future tasks. " +
+          "Use '/' in the name to organize into topics (e.g. 'auth/login/logic'). " +
+          "Prefix with 'global/' to share across all projects.",
+        parameters: {
+          type: "object",
+          properties: {
+            memory_name: {
+              type: "string",
+              description: "Meaningful name for the memory.",
+            },
+            content: {
+              type: "string",
+              description: "Content to save (markdown format).",
+            },
+          },
+          required: ["memory_name", "content"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "edit_memory",
+        description: "Replace content in an existing memory using a literal string or regex pattern.",
+        parameters: {
+          type: "object",
+          properties: {
+            memory_name: {
+              type: "string",
+              description: "Name of the memory to edit.",
+            },
+            needle: {
+              type: "string",
+              description: "String or regex pattern to search for.",
+            },
+            repl: {
+              type: "string",
+              description: "Replacement string.",
+            },
+            mode: {
+              type: "string",
+              enum: ["literal", "regex"],
+              description: "Whether needle is a literal string or regex.",
+            },
+            allow_multiple_occurrences: {
+              type: "boolean",
+              description: "Whether to allow replacing multiple occurrences. Defaults to false.",
+            },
+          },
+          required: ["memory_name", "needle", "repl", "mode"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_memory",
+        description: "Delete a project memory. Only call when explicitly instructed by the user.",
+        parameters: {
+          type: "object",
+          properties: {
+            memory_name: {
+              type: "string",
+              description: "Name of the memory to delete.",
+            },
+          },
+          required: ["memory_name"],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "rename_memory",
+        description:
+          "Rename or move a memory. Moving between project scope and global scope is supported " +
+          "(prefix with 'global/' for global scope).",
+        parameters: {
+          type: "object",
+          properties: {
+            old_name: {
+              type: "string",
+              description: "Current memory name.",
+            },
+            new_name: {
+              type: "string",
+              description: "New memory name.",
+            },
+          },
+          required: ["old_name", "new_name"],
+          additionalProperties: false,
+        },
+      },
+    },
+
+    // ── Serena: workflow tools ────────────────────────────────────────────────
+    {
+      type: "function",
+      function: {
+        name: "initial_instructions",
+        description:
+          "Read Serena's usage instructions. Call this at the start of a new session to understand " +
+          "how to use the available tools effectively.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "check_onboarding_performed",
+        description:
+          "Check whether project onboarding has already been performed. " +
+          "Call before onboarding to avoid repeating it.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "onboarding",
+        description:
+          "Perform project onboarding: analyse the project structure, identify key files, " +
+          "and record useful information as memories.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+
+    // ── Serena: config tools ──────────────────────────────────────────────────
+    {
+      type: "function",
+      function: {
+        name: "get_current_config",
+        description:
+          "Print the current Serena configuration, including active project, available tools, contexts, and modes. " +
+          "Useful for debugging Serena setup issues.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "open_dashboard",
+        description:
+          "Open the Serena web dashboard in the user's default browser. " +
+          "The dashboard shows logs, session info, and tool usage statistics.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+
+    // ── Non-Serena tools ──────────────────────────────────────────────────────
     {
       type: "function",
       function: {
         name: "AskUserQuestion",
         description:
-          "When the task has ambiguities or multiple implementation approaches, use this tool to pause execution and ask the user a question to get clarification or make a decision.",
+          "Pause execution and ask the user a clarifying question when the task has ambiguities " +
+          "or multiple valid implementation approaches.",
         parameters: {
           type: "object",
           properties: {
             questions: {
               type: "array",
-              description:
-                "Questions to present to the user. Usually only one question is needed at a time.",
+              description: "Questions to present to the user. Usually only one at a time.",
               items: {
                 type: "object",
                 properties: {
-                  question: {
-                    type: "string",
-                    description: "The question to ask the user.",
-                  },
-                  multiSelect: {
-                    type: "boolean",
-                    description:
-                      "Whether the user may choose multiple options.",
-                  },
+                  question: { type: "string", description: "The question to ask." },
+                  multiSelect: { type: "boolean", description: "Whether the user may select multiple options." },
                   options: {
                     type: "array",
-                    description:
-                      "A list of predefined options for the user to choose from.",
+                    description: "Predefined options for the user to choose from.",
                     items: {
                       type: "object",
                       properties: {
-                        label: {
-                          type: "string",
-                          description:
-                            "The display text for the option.",
-                        },
-                        description: {
-                          type: "string",
-                          description:
-                            "A detailed explanation or hint about this option to help the user understand what happens if they choose it.",
-                        },
+                        label: { type: "string", description: "Display text for the option." },
+                        description: { type: "string", description: "Explanation of the option." },
                       },
                       required: ["label"],
                     },
@@ -510,119 +1350,22 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
     {
       type: "function",
       function: {
-        name: "read",
-        description:
-          "Read files from the filesystem (text, images, PDFs, notebooks).",
+        name: "WebSearch",
+        description: "Perform a web search using a natural language query.",
         parameters: {
           type: "object",
           properties: {
-            file_path: {
+            query: {
               type: "string",
-              description: "UNIX-style path to file",
-            },
-            offset: {
-              type: "number",
-              description: "Line number to start reading from",
-            },
-            limit: {
-              type: "number",
-              description: "Number of lines to read",
-            },
-            pages: {
-              type: "string",
-              description:
-                'Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files.',
+              description: "A clear, specific natural language search query.",
             },
           },
-          required: ["file_path"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "write",
-        description:
-          "Create files or overwrite them with a complete string payload. Prefer edit for existing files.",
-        parameters: {
-          type: "object",
-          properties: {
-            file_path: {
-              type: "string",
-              description: "Absolute path to file",
-            },
-            content: {
-              type: "string",
-              description: "Complete file content as a single string. Serialize JSON documents before writing.",
-            },
-          },
-          required: ["file_path", "content"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "edit",
-        description: "Perform scoped string replacements in files.",
-        parameters: {
-          type: "object",
-          properties: {
-            file_path: {
-              type: "string",
-              description: "Absolute path to file. Optional when snippet_id is provided.",
-            },
-            snippet_id: {
-              type: "string",
-              description: "Snippet id returned by the Read or Edit tool to scope the search range after a partial read.",
-            },
-            old_string: {
-              type: "string",
-              description: "Exact text to replace inside the file or snippet scope",
-            },
-            new_string: {
-              type: "string",
-              description: "Replacement text (must differ from old_string)",
-            },
-            replace_all: {
-              type: "boolean",
-              description:
-                "Replace all occurences of old_string (default false)",
-              default: false,
-            },
-            expected_occurrences: {
-              type: "number",
-              description:
-                "Expected number of matches, especially useful as a safety check with replace_all",
-            },
-          },
-          required: ["old_string", "new_string"],
+          required: ["query"],
           additionalProperties: false,
         },
       },
     },
   ];
-
-  tools.push({
-    type: "function",
-    function: {
-      name: "WebSearch",
-      description: "Perform web searching using a natural language query.",
-      parameters: {
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "A search query phrased as a clear, specific natural language question or statement that includes key context.",
-          },
-        },
-        required: ["query"],
-        additionalProperties: false,
-      },
-    },
-  });
 
   return tools;
 }
