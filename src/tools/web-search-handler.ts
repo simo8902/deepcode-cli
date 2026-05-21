@@ -1,4 +1,3 @@
-import { randomUUID } from "crypto";
 import { spawn } from "child_process";
 import type OpenAI from "openai";
 import type { CreateOpenAIClient, ToolExecutionContext, ToolExecutionResult } from "./executor";
@@ -6,7 +5,6 @@ import type { CreateOpenAIClient, ToolExecutionContext, ToolExecutionResult } fr
 const MAX_OUTPUT_CHARS = 30000;
 const MAX_CAPTURE_CHARS = 10 * 1024 * 1024;
 const WEB_SEARCH_TOOL_ACTIVITY_PREFIX = "WebSearch:";
-const DEFAULT_WEB_SEARCH_API_URL = "https://deepcode.vegamo.cn/api/plugin/web-search";
 
 type SearchLanguage = "en" | "zh";
 
@@ -49,16 +47,12 @@ export async function handleWebSearchTool(
     return executeConfiguredWebSearch(query, scriptPath, context);
   }
 
-  if (!hasUsableClient(llmContext)) {
-    return {
-      ok: false,
-      name: "WebSearch",
-      error:
-        "WebSearch default mode requires a valid LLM configuration in ~/.deepcode/settings.json."
-    };
-  }
-
-  return executeDefaultWebSearch(query, llmContext, context);
+  return {
+    ok: false,
+    name: "WebSearch",
+    error:
+      "WebSearch requires a custom search script. Set \"webSearchTool\" in ~/.deepcode/settings.json."
+  };
 }
 
 function hasUsableClient(value: ReturnType<CreateOpenAIClient> | undefined): value is LLMClientContext {
@@ -117,41 +111,6 @@ async function executeConfiguredWebSearch(
   };
 }
 
-async function executeDefaultWebSearch(
-  query: string,
-  llmContext: LLMClientContext,
-  context: ToolExecutionContext
-): Promise<ToolExecutionResult> {
-  try {
-    const prepared = await prepareSearchQuery(query, llmContext);
-    const output = await runDefaultWebSearchRequest(
-      prepared.resolvedQuery,
-      llmContext.machineId,
-      context
-    );
-
-    return {
-      ok: true,
-      name: "WebSearch",
-      output,
-      metadata: {
-        originalQuery: query,
-        resolvedQuery: prepared.resolvedQuery,
-        translated: prepared.translated,
-        dominantLanguage: prepared.decision.dominantLanguage,
-        languageReason: prepared.decision.reason
-      }
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      ok: false,
-      name: "WebSearch",
-      error: `WebSearch default mode failed: ${message}`
-    };
-  }
-}
-
 async function runWebSearchScript(
   scriptPath: string,
   query: string,
@@ -205,34 +164,22 @@ async function prepareSearchQuery(query: string, llmContext: LLMClientContext): 
   if (decision.dominantLanguage === "en" && containsChinese) {
     const translatedQuery = await translateQuery(query, "English", llmContext);
     if (translatedQuery) {
-      return {
-        resolvedQuery: translatedQuery,
-        decision,
-        translated: true
-      };
+      return { resolvedQuery: translatedQuery, decision, translated: true };
     }
   }
 
   if (decision.dominantLanguage === "zh" && !containsChinese) {
     const translatedQuery = await translateQuery(query, "Chinese", llmContext);
     if (translatedQuery) {
-      return {
-        resolvedQuery: translatedQuery,
-        decision,
-        translated: true
-      };
+      return { resolvedQuery: translatedQuery, decision, translated: true };
     }
   }
 
-  return {
-    resolvedQuery: query,
-    decision,
-    translated: false
-  };
+  return { resolvedQuery: query, decision, translated: false };
 }
 
 function containsChineseChar(text: string): boolean {
-  return /[\u4e00-\u9fff]/.test(text);
+  return /[一-鿿]/.test(text);
 }
 
 async function decideSearchLanguage(
@@ -319,49 +266,6 @@ function stripCodeFence(text: string): string {
   const trimmed = text.trim();
   const fenceMatch = trimmed.match(/^```(?:[\w-]+)?\n([\s\S]*?)\n```$/);
   return fenceMatch ? fenceMatch[1] : trimmed;
-}
-
-async function runDefaultWebSearchRequest(
-  query: string,
-  machineId: string | undefined,
-  context: ToolExecutionContext
-): Promise<string> {
-  if (!machineId) {
-    throw new Error("Missing vscode.env.machineId for the default WebSearch request.");
-  }
-
-  const activityId = `web-search-${randomUUID()}`;
-  context.onProcessStart?.(activityId, formatWebSearchActivityLabel(query));
-  try {
-    const response = await fetch(DEFAULT_WEB_SEARCH_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Token: machineId
-      },
-      body: JSON.stringify({ query })
-    });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(
-        `WebSearch API request failed with status ${response.status}${body ? `: ${body}` : ""}`
-      );
-    }
-
-    const payload = (await response.json()) as {
-      success?: unknown;
-      result?: unknown;
-    };
-
-    if (typeof payload.result === "string" && payload.result.trim()) {
-      return payload.result.trim();
-    }
-  } finally {
-    context.onProcessExit?.(activityId);
-  }
-
-  throw new Error("The web search response was empty.");
 }
 
 function appendChunk(existing: string, chunk: string | Buffer): string {

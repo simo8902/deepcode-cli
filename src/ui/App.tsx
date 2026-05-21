@@ -65,6 +65,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [nowTick, setNowTick] = useState(0);
+  const [balance, setBalance] = useState<string>("");
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
@@ -104,6 +105,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   useEffect(() => {
     refreshSessionsList();
     void refreshSkills();
+    void refreshBalance();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -121,6 +123,29 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
       setSkills(list);
     } catch {
       // ignore
+    }
+  }
+
+  async function refreshBalance(): Promise<void> {
+    const settings = resolveCurrentSettings();
+    if (!settings.apiKey || !isDeepSeekBaseURL(settings.baseURL)) {
+      return;
+    }
+    try {
+      const url = new URL("/user/balance", settings.baseURL).toString();
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${settings.apiKey}` } });
+      if (!res.ok) return;
+      const data = await res.json() as { balance_infos?: Array<{ currency: string; total_balance: string }> };
+      const infos = data.balance_infos ?? [];
+      const info =
+        infos.find((i) => i.currency === "USD") ??
+        infos.find((i) => i.currency === "EUR") ??
+        infos[0];
+      if (info) {
+        setBalance(`${info.total_balance} ${info.currency}`);
+      }
+    } catch {
+      // ignore — balance is optional display
     }
   }
 
@@ -201,6 +226,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         await sessionManager.handleUserPrompt(prompt);
         await refreshSkills();
         refreshSessionsList();
+        void refreshBalance();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setErrorLine(message);
@@ -336,9 +362,9 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           );
         }}
       </Static>
-      {statusLine ? (
+      {(statusLine || balance) ? (
         <Box>
-          <Text dimColor>{statusLine}</Text>
+          <Text dimColor>{[statusLine, balance ? `balance: ${balance}` : ""].filter(Boolean).join(" - ")}</Text>
         </Box>
       ) : null}
       {errorLine ? (
@@ -406,16 +432,42 @@ function buildSyntheticUserMessage(content: string, imageCount: number): Session
   };
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
 function buildStatusLine(entry: SessionEntry): string {
   const parts: string[] = [];
   parts.push(`status: ${entry.status}`);
-  if (typeof entry.activeTokens === "number" && entry.activeTokens > 0) {
+
+  const u = entry.lastResponseUsage as Record<string, unknown> | null | undefined;
+  if (u && typeof u === "object") {
+    const prompt = typeof u.prompt_tokens === "number" ? u.prompt_tokens : 0;
+    const completion = typeof u.completion_tokens === "number" ? u.completion_tokens : 0;
+    const cacheHit = typeof u.prompt_cache_hit_tokens === "number" ? u.prompt_cache_hit_tokens : 0;
+    if (prompt > 0 || completion > 0) {
+      let tok = `in: ${fmtTokens(prompt)} - out: ${fmtTokens(completion)}`;
+      if (cacheHit > 0) tok += ` - cache: ${fmtTokens(cacheHit)}`;
+      parts.push(tok);
+    }
+  } else if (typeof entry.activeTokens === "number" && entry.activeTokens > 0) {
     parts.push(`tokens: ${entry.activeTokens}`);
   }
+
   if (entry.failReason) {
     parts.push(`fail: ${entry.failReason}`);
   }
-  return parts.join(" · ");
+  return parts.join(" - ");
+}
+
+function isDeepSeekBaseURL(baseURL: string | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    return new URL(baseURL).hostname.toLowerCase().includes("deepseek.com");
+  } catch {
+    return baseURL.toLowerCase().includes("deepseek.com");
+  }
 }
 
 export function readSettings(): DeepcodingSettings | null {

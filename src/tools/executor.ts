@@ -2,6 +2,8 @@ import type OpenAI from "openai";
 import type { DataCollection, ProviderPrivacyMode, ReasoningEffort } from "../settings";
 import { logWarn } from "../error-logger";
 import { handleAskUserQuestionTool } from "./ask-user-question-handler";
+import { handleRipgrepTool } from "./ripgrep-handler";
+import { handleAstGrepTool } from "./ast-grep-handler";
 import {
   handleCheckOnboardingPerformedTool,
   handleCreateTextFileTool,
@@ -208,7 +210,11 @@ export class ToolExecutor {
     this.toolHandlers.set("open_dashboard", handleOpenDashboardTool);
     this.toolHandlers.set("get_current_config", handleGetCurrentConfigTool);
 
-    // Non-Serena tools (kept as-is)
+    // Native search tools
+    this.toolHandlers.set("ripgrep_search", handleRipgrepTool);
+    this.toolHandlers.set("ast_grep_search", handleAstGrepTool);
+
+    // Non-Serena tools
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
   }

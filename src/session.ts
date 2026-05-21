@@ -9,7 +9,7 @@ import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "open
 import { launchNotifyScript } from "./notify";
 import { buildThinkingRequestOptions } from "./openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
-import { getCompactPrompt, getSystemPrompt, getTools, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
+import { getCompactPrompt, getSystemPrompt, getTools, checkToolInstalled, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
 import { logApiError, logWarn } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
@@ -17,7 +17,6 @@ import type { ProviderPrivacyMode } from "./settings";
 import { sanitizeForProviderStrict } from "./privacy-guard";
 
 const MAX_SESSION_ENTRIES = 50;
-const DEFAULT_NEW_PROMPT_API_URL = "https://deepcode.vegamo.cn/api/plugin/new";
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
 const FINAL_HTTP_BODY_LOG_ENV = "DEEPCODE_LOG_FINAL_HTTP_BODY";
@@ -125,6 +124,7 @@ export type SessionEntry = {
   status: SessionStatus;
   failReason: string | null;
   usage: unknown | null;
+  lastResponseUsage: unknown | null;
   activeTokens: number;
   createTime: string;
   updateTime: string;
@@ -936,6 +936,7 @@ The candidate skills are as follows:\n\n`;
       status: "pending",
       failReason: null,
       usage: null,
+      lastResponseUsage: null,
       activeTokens: 0,
       createTime: now,
       updateTime: now,
@@ -1187,6 +1188,7 @@ ${skillMd}
           assistantRefusal: refusal,
           toolCalls,
           usage: accumulateUsage(entry.usage, responseUsage),
+          lastResponseUsage: responseUsage,
           activeTokens: getTotalTokens(responseUsage),
           status: refusal
             ? "failed"
@@ -1335,40 +1337,16 @@ ${skillMd}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { webSearchEnabled: boolean } {
+  private getPromptToolOptions(): { webSearchEnabled: boolean; ripgrepEnabled: boolean; astGrepEnabled: boolean } {
     return {
-      webSearchEnabled: true
+      webSearchEnabled: true,
+      ripgrepEnabled: checkToolInstalled("rg"),
+      astGrepEnabled: checkToolInstalled("sg"),
     };
   }
 
   private reportNewPrompt(): void {
-    const { machineId } = this.createOpenAIClient();
-    if (!machineId) {
-      return;
-    }
-
-    void fetch(DEFAULT_NEW_PROMPT_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Token: machineId
-      },
-      body: JSON.stringify({})
-    })
-      .then(async (response) => {
-        if (response.ok) {
-          return;
-        }
-
-        const body = await response.text().catch(() => "");
-        throw new Error(
-          `New prompt API request failed with status ${response.status}${body ? `: ${body}` : ""}`
-        );
-      })
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        console.warn(`Failed to report new prompt: ${message}`);
-      });
+    // no-op: external reporting disabled
   }
 
   interruptActiveSession(): void {
@@ -2330,6 +2308,7 @@ ${skillMd}
       status: this.normalizeSessionStatus(value.status),
       failReason: typeof value.failReason === "string" ? value.failReason : null,
       usage: value.usage ?? null,
+      lastResponseUsage: value.lastResponseUsage ?? null,
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),

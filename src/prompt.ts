@@ -286,15 +286,57 @@ Be token-aware and avoid unnecessary verbosity.`;
 
 type PromptToolOptions = {
   webSearchEnabled?: boolean;
+  ripgrepEnabled?: boolean;
+  astGrepEnabled?: boolean;
 };
 
 const TOOL_USAGE_GUIDANCE = `# Tool Usage
 
-All provided tools are available for use. Choose any available tool when it helps complete the user's request, inspect the workspace, verify behavior, or gather needed context. Never read obvious secret-bearing files unless the user explicitly asks and the environment has enabled sensitive reads.
+Never read obvious secret-bearing files unless the user explicitly asks and the environment has enabled sensitive reads.
 
-Available tool schemas are provided separately in the API request.
+## Mandatory Tool Selection Protocol
 
-# Session Startup
+You MUST follow this decision tree before every tool call. Violating it wastes tokens, bloats context, and degrades response quality.
+
+### Discovery — when you don't know where something is
+
+1. NEVER open a file to explore it. Always map first.
+2. Call \`get_symbols_overview\` on the relevant directory or file to get a structural index (symbol names, line numbers, no code content).
+3. From the index, identify the exact symbol you need.
+4. Then call \`find_symbol\` to read only that symbol's body.
+
+### Search — when you know what to find but not where
+
+- Known symbol name → \`find_symbol\`. Never grep for a symbol name.
+- Known text/string, unknown location → \`ripgrep_search\` (if available, else \`search_for_pattern\`). Fastest for literal text and regex across files.
+- Known code structure/shape (e.g. "all async functions that call X") → \`ast_grep_search\` (if available). Use when you need structural precision, not just text matching.
+- Known file mask → \`find_file\`. Never use shell glob or find commands.
+- NEVER use \`execute_shell_command\` with grep/rg/sg/find for code search.
+
+### Reading — when you know exactly where to look
+
+- Reading a function or class → \`find_symbol\`. Never \`read_file\` the whole file.
+- Reading a specific line range you already know from a prior symbol lookup → \`read_file\` with \`start_line\`/\`end_line\`.
+- Reading a small config or non-code file → \`read_file\` is acceptable.
+- Reading an entire source file → FORBIDDEN unless the file is under 50 lines. Use symbol tools instead.
+
+### Editing
+
+- Replacing a whole function or method body → \`replace_symbol_body\`.
+- Targeted in-place text change → \`replace_content\` in regex mode.
+- Creating a new file → \`create_text_file\`.
+- NEVER rewrite an entire file to make a small change.
+
+### Shell commands
+
+- \`execute_shell_command\` is for running builds, tests, installers, and runtime commands only.
+- NEVER use it for file reading, searching, or code navigation. Use the dedicated tools above.
+
+## Cost Awareness
+
+Every unnecessary file read costs tokens from a fixed budget that cannot be recovered. A full file read of a 500-line file costs ~10x more than a targeted \`find_symbol\` call that returns only the 20 lines you need. Always prefer the narrowest tool that answers the question.
+
+## Session Startup
 
 At the very start of every session, before responding to the user's first message, run this sequence:
 1. Call \`check_onboarding_performed\` to check if project onboarding has already been done.
@@ -345,8 +387,8 @@ function getRuntimeContext(projectRoot: string): string {
     ...shellModeOpts,
     ...runtimeVersions,
     "command installed": {
-      "ast-grep": checkToolInstalled("ast-grep"),
-      "ripgrep": checkToolInstalled("rg"),
+      "ast-grep (sg)": checkToolInstalled("sg"),
+      "ripgrep (rg)": checkToolInstalled("rg"),
       "jq": checkToolInstalled("jq")
     }
   };
@@ -355,7 +397,7 @@ function getRuntimeContext(projectRoot: string): string {
   return result;
 }
 
-function checkToolInstalled(tool: string): boolean {
+export function checkToolInstalled(tool: string): boolean {
   try {
     if (process.platform === "win32") {
       execFileSync("where.exe", [tool], { encoding: "utf8", stdio: "ignore", windowsHide: true });
@@ -417,7 +459,6 @@ export type ToolDefinition = {
 };
 
 export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
-  void options;
   const tools: ToolDefinition[] = [
 
     // ── Serena: shell ────────────────────────────────────────────────────────
@@ -426,8 +467,8 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       function: {
         name: "execute_shell_command",
         description:
-          "Execute a shell command and return its output. " +
-          "The working directory defaults to the project root. " +
+          "Execute a shell command for builds, tests, installs, and runtime operations. " +
+          "NEVER use for file reading, searching, or code navigation — use the dedicated tools for those. " +
           "Do not use for long-running or interactive processes.",
         parameters: {
           type: "object",
@@ -454,8 +495,10 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       function: {
         name: "read_file",
         description:
-          "Read a file (or a slice of it) within the project directory. " +
-          "Use get_symbols_overview first when you need a structural overview.",
+          "Read a specific line range of a file. " +
+          "ONLY use this when you already know the exact lines you need from a prior symbol lookup. " +
+          "NEVER use this to explore or understand a file — use get_symbols_overview then find_symbol instead. " +
+          "NEVER read an entire source file; always supply start_line and end_line.",
         parameters: {
           type: "object",
           properties: {
@@ -685,8 +728,9 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       function: {
         name: "search_for_pattern",
         description:
-          "Search for a regex pattern across project files. " +
-          "Prefer symbolic tools when you know which symbol you are looking for.",
+          "Search for a regex pattern across project files when you don't know the symbol name. " +
+          "If you know the symbol name, use find_symbol instead — it's faster and more precise. " +
+          "NEVER use execute_shell_command with grep/rg for code search — always use this tool.",
         parameters: {
           type: "object",
           properties: {
@@ -748,8 +792,10 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       function: {
         name: "get_symbols_overview",
         description:
-          "Get an overview of the top-level symbols (classes, functions, etc.) defined in a file. " +
-          "Call this first when exploring a new file before reading the full content.",
+          "Get a structural index of all symbols (classes, functions, methods) in a file or directory — names and line numbers only, no code content. " +
+          "This is your PRIMARY entry point for any codebase exploration. " +
+          "ALWAYS call this before read_file or find_symbol when you don't yet know where something is. " +
+          "Costs a fraction of a file read.",
         parameters: {
           type: "object",
           properties: {
@@ -772,8 +818,9 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       function: {
         name: "find_symbol",
         description:
-          "Find symbols (classes, methods, functions, etc.) by name path pattern across the codebase. " +
-          "A name path is like 'MyClass/my_method'. Supports simple names, relative paths, and absolute paths (prefix '/').",
+          "Read the exact source of a symbol (function, method, class) by name. " +
+          "Use this instead of read_file whenever you know what symbol you want — it returns only that symbol's code, nothing else. " +
+          "Name path format: 'MyClass/my_method' or just 'my_method'. Prefix with '/' for absolute path.",
         parameters: {
           type: "object",
           properties: {
@@ -1366,6 +1413,100 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       },
     },
   ];
+
+  // ── ripgrep: fast text/regex search ─────────────────────────────────────
+  if (options.ripgrepEnabled) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "ripgrep_search",
+        description:
+          "Fast text and regex search across the codebase using ripgrep. " +
+          "Use this when you know a string or regex pattern but not which file contains it. " +
+          "Respects .gitignore automatically. Much faster than search_for_pattern. " +
+          "For structural code search (e.g. find all functions matching a shape), use ast_grep_search instead. " +
+          "For known symbol names, use find_symbol instead.",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: {
+              type: "string",
+              description: "Regex or literal string to search for.",
+            },
+            path: {
+              type: "string",
+              description: "Relative path to search in. Defaults to project root.",
+            },
+            glob: {
+              type: "string",
+              description: "File glob filter, e.g. '*.ts' or 'src/**/*.py'.",
+            },
+            fixed_strings: {
+              type: "boolean",
+              description: "If true, treat pattern as a literal string (no regex). Default false.",
+            },
+            case_insensitive: {
+              type: "boolean",
+              description: "If true, search case-insensitively. Default false.",
+            },
+            context_lines: {
+              type: "number",
+              description: "Lines of context to include before and after each match (max 10). Default 0.",
+            },
+          },
+          required: ["pattern"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
+
+  // ── ast-grep: structural code search ────────────────────────────────────
+  if (options.astGrepEnabled) {
+    tools.push({
+      type: "function",
+      function: {
+        name: "ast_grep_search",
+        description:
+          "Structural AST-aware code search using ast-grep. Works across all languages including C++, C#, TypeScript, Python, Rust, Go, Java. " +
+          "Use this whenever the query is about code shape or structure — not just text. " +
+          "TRIGGER EXAMPLES (use ast_grep_search for any of these): " +
+          "'find all try/catch blocks' — pattern: 'try { $$$ } catch ($$$) { $$$ }'; " +
+          "'find all class definitions' — pattern: 'class $NAME { $$$ }'; " +
+          "'find every new X() call' — pattern: 'new $CLASS($$$)'; " +
+          "'find all if statements with a specific condition shape' — pattern: 'if ($COND) { $$$ }'; " +
+          "'find all async methods (C#)' — pattern: 'async $RET $METHOD($$$) { $$$ }'; " +
+          "'find all using blocks (C#)' — pattern: 'using ($$$) { $$$ }'; " +
+          "'find all template functions (C++)' — pattern: 'template<$$$> $RET $FUNC($$$) { $$$ }'; " +
+          "'find all lambda expressions (C#/TS)' — pattern: '($$$) => $$$'; " +
+          "'find all function calls to X' — pattern: 'X($$$)'; " +
+          "'find all throw statements' — pattern: 'throw $ERR'. " +
+          "Metavariables: $VAR matches any single node, $$$ARGS matches zero or more nodes. " +
+          "lang values: cpp, c_sharp, typescript, javascript, python, rust, go, java, c. " +
+          "For plain text/string search, use ripgrep_search instead. " +
+          "For known symbol names, use find_symbol instead.",
+        parameters: {
+          type: "object",
+          properties: {
+            pattern: {
+              type: "string",
+              description: "ast-grep structural pattern. Mirrors actual code syntax with $VAR (single node) and $$$ARGS (multiple nodes) as metavariables.",
+            },
+            lang: {
+              type: "string",
+              description: "Language grammar to use. Options: cpp, c_sharp, typescript, javascript, python, rust, go, java, c.",
+            },
+            path: {
+              type: "string",
+              description: "Relative path to search in. Defaults to project root.",
+            },
+          },
+          required: ["pattern", "lang"],
+          additionalProperties: false,
+        },
+      },
+    });
+  }
 
   return tools;
 }

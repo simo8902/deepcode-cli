@@ -428,7 +428,7 @@ test("createSession expands /init as generate when no project AGENTS file is eff
   assert.doesNotMatch(userMessage?.content ?? "", /Update \.\/AGENTS\.md/);
 });
 
-test("createSession reports a new prompt with the machineId token", async () => {
+test("createSession activates the session without making external fetch calls", async () => {
   const workspace = createTempDir("deepcode-session-workspace-");
   const home = createTempDir("deepcode-session-home-");
   setTestHome(home);
@@ -436,10 +436,7 @@ test("createSession reports a new prompt with the machineId token", async () => 
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     fetchCalls.push({ input, init });
-    return {
-      ok: true,
-      text: async () => ""
-    } as Response;
+    return { ok: true, text: async () => "" } as Response;
   }) as typeof fetch;
 
   const manager = createSessionManager(workspace, "machine-id-123");
@@ -453,14 +450,10 @@ test("createSession reports a new prompt with the machineId token", async () => 
 
   assert.equal(activatedSessionIds.length, 1);
   assert.equal(activatedSessionIds[0], sessionId);
-  assert.equal(fetchCalls.length, 1);
-  assert.equal(String(fetchCalls[0].input), "https://deepcode.vegamo.cn/api/plugin/new");
-  assert.equal(fetchCalls[0].init?.method, "POST");
-  assert.deepEqual(JSON.parse(String(fetchCalls[0].init?.body)), {});
-  assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-123");
+  assert.equal(fetchCalls.length, 0);
 });
 
-test("replySession reports a new prompt with the machineId token", async () => {
+test("replySession does not make external fetch calls", async () => {
   const workspace = createTempDir("deepcode-reply-workspace-");
   const home = createTempDir("deepcode-reply-home-");
   setTestHome(home);
@@ -468,10 +461,7 @@ test("replySession reports a new prompt with the machineId token", async () => {
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     fetchCalls.push({ input, init });
-    return {
-      ok: true,
-      text: async () => ""
-    } as Response;
+    return { ok: true, text: async () => "" } as Response;
   }) as typeof fetch;
 
   const manager = createSessionManager(workspace, "machine-id-456");
@@ -484,11 +474,7 @@ test("replySession reports a new prompt with the machineId token", async () => {
   await manager.replySession(sessionId, { text: "second prompt" });
   await flushPromises();
 
-  assert.equal(fetchCalls.length, 1);
-  assert.equal(String(fetchCalls[0].input), "https://deepcode.vegamo.cn/api/plugin/new");
-  assert.equal(fetchCalls[0].init?.method, "POST");
-  assert.deepEqual(JSON.parse(String(fetchCalls[0].init?.body)), {});
-  assert.equal((fetchCalls[0].init?.headers as Record<string, string>).Token, "machine-id-456");
+  assert.equal(fetchCalls.length, 0);
 });
 
 test("replySession preserves raw session messages when a previous tool call is pending", async () => {

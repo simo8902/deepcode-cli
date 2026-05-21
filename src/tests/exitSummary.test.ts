@@ -45,6 +45,7 @@ function buildSession(usage: unknown): SessionEntry {
     status: "completed",
     failReason: null,
     usage,
+    lastResponseUsage: null,
     activeTokens: 0,
     createTime: "2026-01-01T00:00:00.000Z",
     updateTime: "2026-01-01T00:00:01.000Z",
