@@ -42,7 +42,7 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
-  command?: "new" | "resume" | "exit";
+  command?: "new" | "resume" | "exit" | "ida" | "ce";
 };
 
 type Props = {
@@ -494,6 +494,14 @@ export const PromptInput = React.memo(function PromptInput({
     if (item.kind === "exit") {
       onSubmit({ text: "/exit", imageUrls: [], command: "exit" });
       setBuffer(EMPTY_BUFFER);
+      return;
+    }
+    if (item.kind === "ce") {
+      onSubmit({ text: "", imageUrls: [], command: "ce" });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
       return;
     }
   }

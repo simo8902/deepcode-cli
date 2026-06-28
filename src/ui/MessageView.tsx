@@ -98,37 +98,32 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   return null;
 }
 
-const SERENA_TOOL_LABELS: Record<string, string> = {
-  execute_shell_command: "Shell",
-  read_file: "Read",
-  create_text_file: "Write",
-  replace_content: "Edit",
-  list_dir: "List Dir",
-  find_file: "Find File",
-  search_for_pattern: "Search",
-  get_symbols_overview: "Symbols",
-  find_symbol: "Find Symbol",
-  find_referencing_symbols: "References",
-  find_implementations: "Implementations",
-  find_declaration: "Declaration",
-  get_diagnostics_for_file: "Diagnostics",
-  replace_symbol_body: "Replace Symbol",
-  insert_after_symbol: "Insert After",
-  insert_before_symbol: "Insert Before",
-  rename_symbol: "Rename Symbol",
-  safe_delete_symbol: "Delete Symbol",
-  list_memories: "Memories",
-  read_memory: "Read Memory",
-  write_memory: "Write Memory",
-  edit_memory: "Edit Memory",
-  delete_memory: "Delete Memory",
-  rename_memory: "Rename Memory",
-  initial_instructions: "Instructions",
-  check_onboarding_performed: "Onboarding Check",
-  onboarding: "Onboarding",
+const TOOL_SOURCE_BADGES: Record<string, { label: string; color: string }> = {
+  // Filesystem MCP
+  read_file: { label: "fs", color: "#4ade80" },
+  read_text_file: { label: "fs", color: "#4ade80" },
+  read_multiple_files: { label: "fs", color: "#4ade80" },
+  read_media_file: { label: "fs", color: "#4ade80" },
+  write_file: { label: "fs", color: "#4ade80" },
+  edit_file: { label: "fs", color: "#4ade80" },
+  create_directory: { label: "fs", color: "#4ade80" },
+  list_directory: { label: "fs", color: "#4ade80" },
+  list_directory_with_sizes: { label: "fs", color: "#4ade80" },
+  directory_tree: { label: "fs", color: "#4ade80" },
+  move_file: { label: "fs", color: "#4ade80" },
+  search_files: { label: "fs", color: "#4ade80" },
+  get_file_info: { label: "fs", color: "#4ade80" },
+  list_allowed_directories: { label: "fs", color: "#4ade80" },
+  // Native
+  ripgrep_search: { label: "rg", color: "#c084fc" },
+  ast_grep_search: { label: "sg", color: "#c084fc" },
+  AskUserQuestion: { label: "ask", color: "#fbbf24" },
+  WebSearch: { label: "web", color: "#fbbf24" },
 };
 
-const SERENA_TOOLS = new Set(Object.keys(SERENA_TOOL_LABELS));
+function getToolBadge(name: string): { label: string; color: string } {
+  return TOOL_SOURCE_BADGES[name] ?? { label: "serena", color: "#f97316" };
+}
 
 function StatusLine({
   bulletColor,
@@ -139,11 +134,11 @@ function StatusLine({
   name: string;
   params: string;
 }): React.ReactElement {
-  const isSerena = SERENA_TOOLS.has(name);
+  const badge = getToolBadge(name);
   return (
     <Text wrap="truncate-end">
       {[
-        isSerena ? <Text key="badge" color="#f97316"> serena › </Text> : null,
+        <Text key="badge" color={badge.color}>{badge.label} › </Text>,
         <Text key="name" bold>{name}</Text>,
         params ? <Text key="params" color="white">{`  ${params}`}</Text> : null
       ]}
@@ -153,9 +148,7 @@ function StatusLine({
 
 function formatToolStatusParams(summary: ToolSummary): string {
   const params = firstNonEmptyLine(summary.params);
-  // Never truncate Serena tool args — show the full call
-  if (SERENA_TOOLS.has(summary.name)) return params;
-  return summary.name.toLowerCase() === "bash" ? params : truncate(params, 120);
+  return params;
 }
 
 type ToolSummary = {
@@ -322,9 +315,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function formatStatusName(value: string): string {
   if (!value) return "Tool";
-  // Serena tools: show the raw tool name so the user sees exactly what was called
-  if (SERENA_TOOLS.has(value)) return value;
-  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+  return value;
 }
 
 function truncate(value: string, max: number): string {

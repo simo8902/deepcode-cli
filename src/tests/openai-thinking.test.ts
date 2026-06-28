@@ -51,7 +51,8 @@ test("buildThinkingRequestOptions omits provider routing when only ZDR is config
   assert.deepEqual(
     buildThinkingRequestOptions(true, "https://openrouter.ai/api/v1", "low", undefined, true),
     {
-      reasoning: { effort: "low" }
+      reasoning: { effort: "low" },
+      provider: { allow_fallbacks: true, zdr: true }
     }
   );
 });
@@ -62,8 +63,9 @@ test("buildThinkingRequestOptions pins providers and disables fallback routing w
     {
       reasoning: { effort: "low" },
       provider: {
+        allow_fallbacks: false,
         only: ["deepinfra"],
-        allow_fallbacks: false
+        zdr: true
       }
     }
   );
@@ -74,8 +76,9 @@ test("buildThinkingRequestOptions omits DeepSeek thinking fields for OpenRouter 
     buildThinkingRequestOptions(false, "https://openrouter.ai/api/v1", "low", "siliconflow", true),
     {
       provider: {
+        allow_fallbacks: false,
         only: ["siliconflow"],
-        allow_fallbacks: false
+        zdr: true
       }
     }
   );

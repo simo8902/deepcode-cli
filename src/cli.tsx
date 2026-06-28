@@ -13,18 +13,18 @@ if (args.includes("--version") || args.includes("-v")) {
 if (args.includes("--help") || args.includes("-h")) {
   process.stdout.write(
     [
-      "deepcode - Deep Shit CLI",
+      "sbdt - SimoByteDaemon Tool",
       "",
       "Usage:",
-      "  deepcode               Launch the interactive TUI in the current directory",
-      "  deepcode --version     Print the version",
-      "  deepcode --help        Show this help",
+      "  sbdt               Launch the interactive TUI in the current directory",
+      "  sbdt --version     Print the version",
+      "  sbdt --help        Show this help",
       "",
       "Configuration:",
-      "  ~/.deepcode/settings.json   API key, model, base URL",
+      "  ~/.sbdt/settings.json        API key, model, base URL",
       "  ~/.agents/skills/*/SKILL.md  User-level skills",
       "  ./.agents/skills/*/SKILL.md  Project-level skills",
-      "  ./.deepcode/skills/*/SKILL.md Legacy project-level skills",
+      "  ./.sbdt/skills/*/SKILL.md    Legacy project-level skills",
       "",
       "Inside the TUI:",
       "  enter            Send the prompt",
@@ -39,6 +39,7 @@ if (args.includes("--help") || args.includes("-h")) {
       "  /new             Start a fresh conversation",
       "  /init            Initialize an AGENTS.md file with instructions for LLM",
       "  /resume          Pick a previous conversation to continue",
+      "  /CE              Reconnect to Cheat Engine MCP server",
       "  /exit            Quit",
       "  ctrl+d twice     Quit"
     ].join("\n") + "\n"
@@ -50,34 +51,34 @@ const projectRoot = process.cwd();
 
 if (!process.stdin.isTTY) {
   process.stderr.write(
-    "deepcode requires an interactive terminal (TTY). " +
+    "sbdt requires an interactive terminal (TTY). " +
       "Re-run from a real terminal session.\n"
   );
   process.exit(1);
 }
 
-const restartRef: { current: (() => void) | null } = { current: null };
+let isRestarting = false;
 
 function startApp(): void {
   const inkInstance = render(
     <App
       projectRoot={projectRoot}
       version={packageInfo.version}
-      onRestart={() => restartRef.current?.()}
+      onRestart={() => {
+        isRestarting = true;
+        process.stdout.write("\u001b[2J\u001b[3J\u001b[H");
+        inkInstance.unmount();
+        startApp();
+      }}
     />,
     { exitOnCtrlC: false }
   );
 
-  restartRef.current = () => {
-    process.stdout.write("[2J[3J[H");
-    inkInstance.unmount();
-    startApp();
-  };
-
   inkInstance.waitUntilExit().then(() => {
-    if (!restartRef.current) {
+    if (!isRestarting) {
       process.exit(0);
     }
+    isRestarting = false;
   });
 }
 
@@ -87,10 +88,10 @@ function readPackageInfo(): { name: string; version: string } {
   try {
     const pkg = require("../package.json") as { name?: unknown; version?: unknown };
     return {
-      name: typeof pkg.name === "string" ? pkg.name : "simo/deepshit-cli",
+      name: typeof pkg.name === "string" ? pkg.name : "simobytedaemontool",
       version: typeof pkg.version === "string" ? pkg.version : ""
     };
   } catch {
-    return { name: "simo/deepshit-cli", version: "" };
+    return { name: "simobytedaemontool", version: "" };
   }
 }

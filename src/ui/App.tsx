@@ -66,6 +66,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [welcomeNonce, setWelcomeNonce] = useState(0);
   const [nowTick, setNowTick] = useState(0);
   const [balance, setBalance] = useState<string>("");
+  const [mcpHealth, setMcpHealth] = useState<string>("");
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
@@ -83,6 +84,9 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setStatusLine(buildStatusLine(entry));
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
+      },
+      onMcpHealth: (health) => {
+        setMcpHealth(buildMcpHealthLine(health));
       },
       onLlmStreamProgress: (progress) => {
         if (progress.phase === "end") {
@@ -191,6 +195,21 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         }
         return;
       }
+      if (submission.command === "ida") {
+        sessionManager.reconnectIda().then((status) => {
+          setStatusLine(status);
+          refreshSessionsList();
+        });
+        return;
+      }
+      if (submission.command === "ce") {
+        sessionManager.reconnectCe().then((status) => {
+          setStatusLine(status);
+          refreshSessionsList();
+        });
+        return;
+      }
+
       if (submission.command === "resume") {
         setShowWelcome(false);
         refreshSessionsList();
@@ -362,6 +381,11 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           );
         }}
       </Static>
+      {(mcpHealth) ? (
+        <Box>
+          <Text dimColor>{mcpHealth}</Text>
+        </Box>
+      ) : null}
       {(statusLine || balance) ? (
         <Box>
           <Text dimColor>{[statusLine, balance ? `balance: ${balance}` : ""].filter(Boolean).join(" - ")}</Text>
@@ -461,6 +485,18 @@ function buildStatusLine(entry: SessionEntry): string {
   return parts.join(" - ");
 }
 
+function buildMcpHealthLine(health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }): string {
+  const items: string[] = [];
+  const fmt = (label: string, h: { ready: boolean; error?: string }) => {
+    if (h.ready) return label + " \u2713";
+    return label + " \u2717";
+  };
+  items.push(fmt("fs", health.fs));
+  items.push(fmt("cb", health.cb));
+  items.push(fmt("serena", health.serena));
+  return "mcp: " + items.join(" | ");
+}
+
 function isDeepSeekBaseURL(baseURL: string | undefined): boolean {
   if (!baseURL) return false;
   try {
@@ -472,7 +508,7 @@ function isDeepSeekBaseURL(baseURL: string | undefined): boolean {
 
 export function readSettings(): DeepcodingSettings | null {
   try {
-    const settingsPath = path.join(os.homedir(), ".deepcode", "settings.json");
+    const settingsPath = path.join(os.homedir(), ".sbdt", "settings.json");
     if (!fs.existsSync(settingsPath)) {
       return null;
     }
@@ -554,7 +590,7 @@ export function createOpenAIClient(): {
 
 function getMachineId(): string | undefined {
   try {
-    const idPath = path.join(os.homedir(), ".deepcode", "machine-id");
+    const idPath = path.join(os.homedir(), ".sbdt", "machine-id");
     if (fs.existsSync(idPath)) {
       const raw = fs.readFileSync(idPath, "utf8").trim();
       if (raw) {

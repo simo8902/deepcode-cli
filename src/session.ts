@@ -11,6 +11,11 @@ import { buildThinkingRequestOptions } from "./openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
 import { getCompactPrompt, getSystemPrompt, getTools, checkToolInstalled, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
 import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
+import { startIdaMcp, getDiscoveredIdaTools } from "./tools/ida-handler";
+import { startCeMcp, getDiscoveredCeTools, getPromptCeTools } from "./tools/ce-handler";
+import { getSerenaHealth } from "./tools/serena-client";
+import { startCodebaseMemoryMcp, getDiscoveredCodebaseMemoryTools, getCodebaseMemoryHealth } from "./tools/codebase-memory-handler";
+import { startFilesystemMcp, getDiscoveredFilesystemTools, getFilesystemHealth } from "./tools/filesystem-handler";
 import { logApiError, logWarn } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
 import type { ProviderPrivacyMode } from "./settings";
@@ -19,7 +24,7 @@ import { sanitizeForProviderStrict } from "./privacy-guard";
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
-const FINAL_HTTP_BODY_LOG_ENV = "DEEPCODE_LOG_FINAL_HTTP_BODY";
+const FINAL_HTTP_BODY_LOG_ENV = "SBDT_LOG_FINAL_HTTP_BODY";
 const require = createRequire(import.meta.url);
 const ejs = require("ejs") as {
   render: (template: string, data?: Record<string, unknown>) => string;
@@ -179,11 +184,12 @@ export type SkillInfo = {
 type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
-  getResolvedSettings: () => { webSearchTool?: string };
+  getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
 };
 
 export type LlmStreamProgress = {
@@ -198,10 +204,11 @@ export type LlmStreamProgress = {
 export class SessionManager {
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
-  private readonly getResolvedSettings: () => { webSearchTool?: string };
+  private readonly getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string; systemPrompt?: string };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
+  private readonly onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
@@ -214,7 +221,11 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onMcpHealth = options.onMcpHealth;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient);
+    void this.warmIdaMcp();
+    void this.warmCodebaseMemoryMcp();
+    void this.warmFilesystemMcp();
   }
 
   private estimateStreamTokens(text: string): number {
@@ -607,7 +618,7 @@ export class SessionManager {
     }
 
     try {
-      const logPath = path.join(os.homedir(), ".deepcode", "logs", "final-http-body.jsonl");
+      const logPath = path.join(os.homedir(), ".sbdt", "logs", "final-http-body.jsonl");
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
       fs.appendFileSync(
         logPath,
@@ -694,7 +705,7 @@ The candidate skills are as follows:\n\n`;
   async listSkills(sessionId?: string): Promise<SkillInfo[]> {
     const homeDir = os.homedir();
     const agentsRoot = path.join(homeDir, ".agents", "skills");
-    const legacyProjectSkillsRoot = path.join(this.projectRoot, ".deepcode", "skills");
+    const legacyProjectSkillsRoot = path.join(this.projectRoot, ".sbdt", "skills");
     const projectAgentsSkillsRoot = path.join(this.projectRoot, ".agents", "skills");
     const skillsByName = new Map<string, SkillInfo>();
 
@@ -735,7 +746,7 @@ The candidate skills are as follows:\n\n`;
     for (const skill of collectSkills(agentsRoot, "~/.agents/skills")) {
       skillsByName.set(skill.name, skill);
     }
-    for (const skill of collectSkills(legacyProjectSkillsRoot, "./.deepcode/skills")) {
+    for (const skill of collectSkills(legacyProjectSkillsRoot, "./.sbdt/skills")) {
       skillsByName.set(skill.name, skill);
     }
     for (const skill of collectSkills(projectAgentsSkillsRoot, "./.agents/skills")) {
@@ -1083,7 +1094,7 @@ ${skillMd}
         updateTime: now
       }));
       this.onAssistantMessage(
-        this.buildAssistantMessage(sessionId, "OpenAI API key not found. Please configure ~/.deepcode/settings.json.", null),
+        this.buildAssistantMessage(sessionId, "OpenAI API key not found. Please configure ~/.sbdt/settings.json.", null),
         false,
       );
       this.maybeNotifyTaskCompletion(sessionId, notify, startedAt);
@@ -1321,7 +1332,7 @@ ${skillMd}
     const summaryMessage: SessionMessage = {
       id: crypto.randomUUID(),
       sessionId,
-      role: "system",
+      role: "user",
       content: `There are earlier parts of the conversation. Here is a summary: \n\n${compactedSummary}`,
       contentParams: null,
       messageParams: null,
@@ -1337,12 +1348,72 @@ ${skillMd}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { webSearchEnabled: boolean; ripgrepEnabled: boolean; astGrepEnabled: boolean } {
+  private getPromptToolOptions(): { webSearchEnabled: boolean; ripgrepEnabled: boolean; astGrepEnabled: boolean; idaMcpEnabled: boolean; idaMcpTools: ReturnType<typeof getDiscoveredIdaTools>; ceMcpEnabled: boolean; ceMcpTools: ReturnType<typeof getPromptCeTools>; codebaseMemoryEnabled: boolean; codebaseMemoryTools: ReturnType<typeof getDiscoveredCodebaseMemoryTools>; filesystemEnabled: boolean; filesystemTools: ReturnType<typeof getDiscoveredFilesystemTools> } {
+    const ceTools = getPromptCeTools();
+    const cbTools = getDiscoveredCodebaseMemoryTools();
+    const fsTools = getDiscoveredFilesystemTools(this.projectRoot);
     return {
       webSearchEnabled: true,
       ripgrepEnabled: checkToolInstalled("rg"),
       astGrepEnabled: checkToolInstalled("sg"),
+      idaMcpEnabled: this.getResolvedSettings().idaMcpUrl ? true : false,
+      idaMcpTools: getDiscoveredIdaTools(),
+      ceMcpEnabled: ceTools.length > 0,
+      ceMcpTools: ceTools,
+      codebaseMemoryEnabled: cbTools.length > 0,
+      codebaseMemoryTools: cbTools,
+      filesystemEnabled: true,
+      filesystemTools: fsTools,
     };
+  }
+
+  private warmFilesystemMcp(): void {
+    startFilesystemMcp(this.projectRoot).then(() => {
+      this.toolExecutor.refreshFilesystemTools();
+    }).catch((err: unknown) => {
+      console.error("[sbdt] MCP failed to start:", err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  private warmCodebaseMemoryMcp(): void {
+    startCodebaseMemoryMcp().then(() => {
+      this.toolExecutor.refreshCodebaseMemoryTools();
+    }).catch((err: unknown) => {
+      console.error("[sbdt] MCP failed to start:", err instanceof Error ? err.message : String(err));
+    });
+  }
+
+  private warmIdaMcp(): void {
+    const settings = this.getResolvedSettings();
+    if (settings.idaMcpUrl) {
+      startIdaMcp().then(() => {
+      this.toolExecutor.refreshIdaTools();
+    }).catch((err: unknown) => {
+      console.error("[sbdt] MCP failed to start:", err instanceof Error ? err.message : String(err));
+    });
+    }
+  }
+
+  async reconnectIda(): Promise<string> {
+    try {
+      await startIdaMcp();
+      this.toolExecutor.refreshIdaTools();
+      return "IDA reconnected — " + getDiscoveredIdaTools().length + " tools available.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return "IDA connection failed: " + message;
+    }
+  }
+
+  async reconnectCe(): Promise<string> {
+    try {
+      await startCeMcp();
+      this.toolExecutor.refreshCeTools();
+      return "Cheat Engine reconnected - " + getDiscoveredCeTools().length + " tools available.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return "Cheat Engine connection failed: " + message;
+    }
   }
 
   private reportNewPrompt(): void {
@@ -1477,7 +1548,7 @@ ${skillMd}
     sessionsIndexPath: string;
   } {
     const projectCode = this.getProjectCode(this.projectRoot);
-    const projectDir = path.join(os.homedir(), ".deepcode", "projects", projectCode);
+    const projectDir = path.join(os.homedir(), ".sbdt", "projects", projectCode);
     const sessionsIndexPath = path.join(projectDir, "sessions-index.json");
     return { projectCode, projectDir, sessionsIndexPath };
   }
@@ -1620,8 +1691,16 @@ ${skillMd}
   private loadProjectAgentInstructions(): { content: string; displayPath: string } | null {
     const candidatePaths = [
       {
-        absolutePath: path.join(this.projectRoot, ".deepcode", "AGENTS.md"),
-        displayPath: "./.deepcode/AGENTS.md"
+        absolutePath: path.join(this.projectRoot, ".sbdt", "SIMO.md"),
+        displayPath: "./.sbdt/SIMO.md"
+      },
+      {
+        absolutePath: path.join(this.projectRoot, "SIMO.md"),
+        displayPath: "./SIMO.md"
+      },
+      {
+        absolutePath: path.join(this.projectRoot, ".sbdt", "AGENTS.md"),
+        displayPath: "./.sbdt/AGENTS.md"
       },
       {
         absolutePath: path.join(this.projectRoot, "AGENTS.md"),
@@ -1660,14 +1739,13 @@ ${skillMd}
       return projectInstructions;
     }
 
-    const userAgentsPath = path.join(os.homedir(), ".deepcode", "AGENTS.md");
+    const userSimoPath = path.join(os.homedir(), ".sbdt", "SIMO.md");
+    const simoContent = this.readNonEmptyFile(userSimoPath);
+    if (simoContent) return { content: simoContent, displayPath: "~/.sbdt/SIMO.md" };
+
+    const userAgentsPath = path.join(os.homedir(), ".sbdt", "AGENTS.md");
     const content = this.readNonEmptyFile(userAgentsPath);
-    return content
-      ? {
-          content,
-          displayPath: "~/.deepcode/AGENTS.md"
-        }
-      : null;
+    return content ? { content, displayPath: "~/.sbdt/AGENTS.md" } : null;
   }
 
   private renderForcedAgentInstructions(agentInstructions: { content: string; displayPath: string }): string {
@@ -1699,7 +1777,7 @@ ${skillMd}
     return {
       id: crypto.randomUUID(),
       sessionId,
-      role: "system",
+      role: "user",
       content,
       contentParams: null,
       messageParams: null,
@@ -1840,7 +1918,21 @@ ${skillMd}
     const openAIMessages: ChatCompletionMessageParam[] = [];
     const emittedToolCallIds = new Set<string>();
 
-    for (let index = 0; index < activeMessages.length; index += 1) {
+    // Merge all leading system messages into one — models like Qwen3 with
+    // strict Jinja chat templates reject any system message after the first.
+    let startIndex = 0;
+    const leadingSystemContents: string[] = [];
+    while (startIndex < activeMessages.length && activeMessages[startIndex].role === "system") {
+      leadingSystemContents.push(activeMessages[startIndex].content ?? "");
+      startIndex += 1;
+    }
+    if (leadingSystemContents.length > 1) {
+      openAIMessages.push({ role: "system", content: leadingSystemContents.join("\n\n") });
+    } else if (leadingSystemContents.length === 1) {
+      openAIMessages.push(this.sessionMessageToOpenAIMessage(activeMessages[0], thinkingEnabled));
+    }
+
+    for (let index = startIndex; index < activeMessages.length; index += 1) {
       const message = activeMessages[index];
       if (message.role === "tool") {
         continue;
@@ -2282,6 +2374,19 @@ ${skillMd}
       null,
       2
     );
+  }
+
+  private emitMcpHealth(): void {
+    if (!this.onMcpHealth) return;
+    this.onMcpHealth(this.getAllMcpHealth());
+  }
+
+  private getAllMcpHealth(): { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } } {
+    return {
+      fs: getFilesystemHealth(this.projectRoot),
+      cb: getCodebaseMemoryHealth(),
+      serena: getSerenaHealth(this.projectRoot),
+    };
   }
 
   private killProcessGroup(pid: number): boolean {

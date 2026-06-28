@@ -1,6 +1,6 @@
 import type { SkillInfo } from "../session";
 
-export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "exit";
+export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "exit" | "ida" | "ce";
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -40,6 +40,18 @@ export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
     name: "exit",
     label: "/exit",
     description: "Quit Deep Code CLI"
+  },
+  {
+    kind: "ida",
+    name: "ida",
+    label: "/ida",
+    description: "Reconnect to IDA Pro MCP server"
+  },
+  {
+    kind: "ce",
+    name: "ce",
+    label: "/CE",
+    description: "Reconnect to Cheat Engine MCP server"
   }
 ];
 
@@ -75,8 +87,8 @@ export function findExactSlashCommand(
   if (!token.startsWith("/")) {
     return null;
   }
-  const query = token.slice(1);
-  const matches = items.filter((item) => item.name === query);
+  const query = token.slice(1).toLowerCase();
+  const matches = items.filter((item) => item.name.toLowerCase() === query);
   return matches.find((item) => item.kind !== "skill") ?? matches[0] ?? null;
 }
 

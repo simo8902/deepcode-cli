@@ -1,7 +1,7 @@
 {
-  "name": "deepshit-cli",
-  "version": "0.1.21",
-  "description": "Deep SHIT CLI for local dev with annoying self awareness and privacy protection like an fuc.king N*SA",
+  "name": "simobytedaemontool",
+  "version": "0.2.0",
+  "description": "SimoByteDaemon — AI coding tool by Simo",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -9,7 +9,7 @@
     "url": "https://github.com/simo8902/deepcode-cli.git"
   },
   "bin": {
-    "deepshit": "./dist/cli.js"
+    "sbdt": "./dist/cli.js"
   },
   "main": "./dist/cli.js",
   "files": [
@@ -26,10 +26,7 @@
     "typecheck": "tsc -p ./ --noEmit",
     "bundle": "esbuild ./src/cli.tsx --bundle --platform=node --format=esm --target=node18 --outfile=dist/cli.js --banner:js=\"#!/usr/bin/env node\" --jsx=automatic --jsx-import-source=react --packages=external --log-override:empty-import-meta=silent",
     "build": "bun run typecheck && bun run bundle && bun -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "inspect:cache-log": "bun run scripts/inspect-final-http-body.mjs",
-    "test": "bun test src/tests/*.test.ts",
-    "test:single": "bun test",
-    "prepack": "bun run build"
+    "test": "bun test src/tests/*.test.ts"
   },
   "dependencies": {
     "@hackylabs/deep-redact": "^3.0.5",
@@ -48,7 +45,6 @@
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "esbuild": "^0.28.0",
-    "tsx": "^4.21.0",
-    "typescript": "^6.0.3"
+"typescript": "^6.0.3"
   }
 }

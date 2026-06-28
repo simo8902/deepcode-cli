@@ -10,6 +10,7 @@ export type DeepcodingEnv = {
   providerPrivacyMode?: string;
   ZDR?: string;
   DATA_COLLECTION?: string;
+  IDA_MCP_URL?: string;
 };
 
 export type ReasoningEffort = "xhigh" | "high" | "medium" | "low" | "minimal" | "none";
@@ -27,6 +28,7 @@ export type DeepcodingSettings = {
   zdr?: boolean;
   dataCollection?: DataCollection;
   cacheControl?: boolean;
+  idaMcpUrl?: string;
 };
 
 export type ResolvedDeepcodingSettings = {
@@ -43,6 +45,7 @@ export type ResolvedDeepcodingSettings = {
   zdr?: boolean;
   dataCollection?: DataCollection;
   cacheControl?: boolean;
+  idaMcpUrl?: string;
 };
 
 function resolveReasoningEffort(value: unknown): ReasoningEffort {
@@ -97,9 +100,16 @@ export function resolveSettings(
     env.DATA_COLLECTION?.trim() || settings?.dataCollection
   );
 
+  // Auto-route OpenRouter-style model names (e.g. "provider/model-name") to
+  // OpenRouter when no explicit BASE_URL has been configured. This lets users
+  // set any OpenRouter model without also having to set BASE_URL manually.
+  const explicitBaseURL = env.BASE_URL?.trim();
+  const resolvedBaseURL = explicitBaseURL
+    || (model.includes("/") ? "https://openrouter.ai/api/v1" : defaults.baseURL);
+
   return {
     apiKey: env.API_KEY?.trim(),
-    baseURL: env.BASE_URL?.trim() || defaults.baseURL,
+    baseURL: resolvedBaseURL,
     model,
     thinkingEnabled: resolveThinkingEnabled(settings, model),
     reasoningEffort: resolveReasoningEffort(settings?.reasoningEffort),
@@ -110,6 +120,7 @@ export function resolveSettings(
     providerPrivacyMode,
     zdr: zdr || undefined,
     dataCollection,
-    cacheControl: settings?.cacheControl === true ? true : undefined
+    cacheControl: settings?.cacheControl === true ? true : undefined,
+    idaMcpUrl: env.IDA_MCP_URL?.trim() || process.env.IDA_MCP_URL?.trim()
   };
 }

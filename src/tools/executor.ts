@@ -6,13 +6,10 @@ import { handleRipgrepTool } from "./ripgrep-handler";
 import { handleAstGrepTool } from "./ast-grep-handler";
 import {
   handleCheckOnboardingPerformedTool,
-  handleCreateTextFileTool,
-  handleDeleteLinesTool,
   handleDeleteMemoryTool,
   handleEditMemoryTool,
   handleExecuteShellCommandTool,
   handleFindDeclarationTool,
-  handleFindFileTool,
   handleFindImplementationsTool,
   handleFindReferencingSymbolsTool,
   handleFindSymbolTool,
@@ -22,25 +19,23 @@ import {
   handleGetSymbolsOverviewTool,
   handleInitialInstructionsTool,
   handleInsertAfterSymbolTool,
-  handleInsertAtLineTool,
   handleInsertBeforeSymbolTool,
-  handleListDirTool,
   handleListMemoriesTool,
   handleOnboardingTool,
   handleOpenDashboardTool,
-  handleReadFileTool,
   handleReadMemoryTool,
   handleRenameMemoryTool,
   handleRenameSymbolTool,
-  handleReplaceContentTool,
-  handleReplaceLinesTool,
   handleReplaceSymbolBodyTool,
   handleRestartLanguageServerTool,
   handleSafeDeleteSymbolTool,
-  handleSearchForPatternTool,
   handleWriteMemoryTool,
 } from "./serena-handlers";
 import { handleWebSearchTool } from "./web-search-handler";
+import { registerIdaTools } from "./ida-handler";
+import { registerCeTools } from "./ce-handler";
+import { registerCodebaseMemoryTools } from "./codebase-memory-handler";
+import { registerFilesystemTools } from "./filesystem-handler";
 
 export type CreateOpenAIClient = () => {
   client: OpenAI | null;
@@ -164,19 +159,11 @@ export class ToolExecutor {
   }
 
   private registerToolHandlers(): void {
-    // Serena — shell
-    this.toolHandlers.set("execute_shell_command", handleExecuteShellCommandTool);
+    // 1. Filesystem MCP — all file I/O (read, write, edit, list, search, mkdir, move)
+    registerFilesystemTools(this.toolHandlers, this.projectRoot);
 
-    // Serena — file tools
-    this.toolHandlers.set("read_file", handleReadFileTool);
-    this.toolHandlers.set("create_text_file", handleCreateTextFileTool);
-    this.toolHandlers.set("replace_content", handleReplaceContentTool);
-    this.toolHandlers.set("delete_lines", handleDeleteLinesTool);
-    this.toolHandlers.set("replace_lines", handleReplaceLinesTool);
-    this.toolHandlers.set("insert_at_line", handleInsertAtLineTool);
-    this.toolHandlers.set("list_dir", handleListDirTool);
-    this.toolHandlers.set("find_file", handleFindFileTool);
-    this.toolHandlers.set("search_for_pattern", handleSearchForPatternTool);
+    // 2. Serena — shell
+    this.toolHandlers.set("execute_shell_command", handleExecuteShellCommandTool);
 
     // Serena — symbol tools
     this.toolHandlers.set("restart_language_server", handleRestartLanguageServerTool);
@@ -214,9 +201,34 @@ export class ToolExecutor {
     this.toolHandlers.set("ripgrep_search", handleRipgrepTool);
     this.toolHandlers.set("ast_grep_search", handleAstGrepTool);
 
+    // IDA Pro MCP tools (dynamically discovered)
+    registerIdaTools(this.toolHandlers);
+
+    // Cheat Engine MCP tools (dynamically discovered)
+    registerCeTools(this.toolHandlers);
+
+    // codebase-memory-mcp tools (dynamically discovered)
+    registerCodebaseMemoryTools(this.toolHandlers);
+
     // Non-Serena tools
     this.toolHandlers.set("AskUserQuestion", handleAskUserQuestionTool);
     this.toolHandlers.set("WebSearch", handleWebSearchTool);
+  }
+
+  refreshIdaTools(): void {
+    registerIdaTools(this.toolHandlers);
+  }
+
+  refreshCeTools(): void {
+    registerCeTools(this.toolHandlers);
+  }
+
+  refreshCodebaseMemoryTools(): void {
+    registerCodebaseMemoryTools(this.toolHandlers);
+  }
+
+  refreshFilesystemTools(): void {
+    registerFilesystemTools(this.toolHandlers, this.projectRoot);
   }
 
   private parseToolCall(toolCall: unknown): ToolCall | null {

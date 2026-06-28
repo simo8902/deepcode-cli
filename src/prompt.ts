@@ -288,6 +288,14 @@ type PromptToolOptions = {
   webSearchEnabled?: boolean;
   ripgrepEnabled?: boolean;
   astGrepEnabled?: boolean;
+  idaMcpEnabled?: boolean;
+  idaMcpTools?: Array<{ name: string; description?: string; inputSchema?: { type: "object"; properties: Record<string, unknown>; required?: string[]; additionalProperties?: boolean } }>;
+  ceMcpEnabled?: boolean;
+  ceMcpTools?: Array<{ name: string; description?: string; inputSchema?: { type: "object"; properties: Record<string, unknown>; required?: string[]; additionalProperties?: boolean } }>;
+  codebaseMemoryEnabled?: boolean;
+  codebaseMemoryTools?: Array<{ name: string; description?: string; inputSchema?: { type: "object"; properties: Record<string, unknown>; required?: string[]; additionalProperties?: boolean } }>;
+  filesystemEnabled?: boolean;
+  filesystemTools?: Array<{ name: string; description?: string; inputSchema?: { type: "object"; properties: Record<string, unknown>; required?: string[]; additionalProperties?: boolean } }>;
 };
 
 const TOOL_USAGE_GUIDANCE = `# Tool Usage
@@ -308,23 +316,30 @@ You MUST follow this decision tree before every tool call. Violating it wastes t
 ### Search — when you know what to find but not where
 
 - Known symbol name → \`find_symbol\`. Never grep for a symbol name.
-- Known text/string, unknown location → \`ripgrep_search\` (if available, else \`search_for_pattern\`). Fastest for literal text and regex across files.
+- Known text/string, unknown location → \`ripgrep_search. Fastest for literal text and regex across files.
 - Known code structure/shape (e.g. "all async functions that call X") → \`ast_grep_search\` (if available). Use when you need structural precision, not just text matching.
-- Known file mask → \`find_file\`. Never use shell glob or find commands.
+- Known file mask → \`search_files\`. Never use shell glob or find commands.
 - NEVER use \`execute_shell_command\` with grep/rg/sg/find for code search.
 
 ### Reading — when you know exactly where to look
 
-- Reading a function or class → \`find_symbol\`. Never \`read_file\` the whole file.
-- Reading a specific line range you already know from a prior symbol lookup → \`read_file\` with \`start_line\`/\`end_line\`.
-- Reading a small config or non-code file → \`read_file\` is acceptable.
+- Reading a function or class → \`find_symbol\`. Never \`read_text_file\` the whole file.
+- Reading a specific line range you already know from a prior symbol lookup → \`read_text_file\` with \`head\` or \`tail\`.
+- Reading a small config or non-code file → \`read_text_file\` is acceptable.
 - Reading an entire source file → FORBIDDEN unless the file is under 50 lines. Use symbol tools instead.
+
+Symbol tools (\`get_symbols_overview\`, \`find_symbol\`, etc.) depend on language servers. Before calling them,
+check the file extension: if it looks like a programming language or structured data format (.py, .ts, .json,
+.yml, .md, etc.), try the symbol tool first. If it looks like plain text, a dotfile, a binary, or anything
+without an obvious language server (.txt, .env, .gitignore, .png, extensionless files), go straight to
+\`read_text_file\` or \`read_file\`. When unsure, call \`get_symbols_overview\` — if it returns empty or errors,
+immediately fall back to filesystem tools without retrying.
 
 ### Editing
 
 - Replacing a whole function or method body → \`replace_symbol_body\`.
-- Targeted in-place text change → \`replace_content\` in regex mode.
-- Creating a new file → \`create_text_file\`.
+- Targeted in-place text change → \`edit_file\`.
+- Creating a new file → \`write_file\`.
 - NEVER rewrite an entire file to make a small change.
 
 ### Shell commands
@@ -342,7 +357,7 @@ At the very start of every session, before responding to the user's first messag
 1. Call \`check_onboarding_performed\` to check if project onboarding has already been done.
 2. If onboarding has NOT been performed:
    a. Use \`AskUserQuestion\` to ask the user which language(s) the project uses. Allow free-text via "Other".
-   b. Map the answer to the appropriate Serena language keys, then rewrite the \`languages\` field in \`.serena/project.yml\` using \`replace_content\`. If the user says none, set \`languages: []\`.
+   b. Map the answer to the appropriate Serena language keys, then rewrite the \`languages\` field in \`.serena/project.yml\` using \`edit_file\`. If the user says none, set \`languages: []\`.
    c. Then call \`onboarding\`.
 3. Do not mention this startup sequence to the user unless it fails.`;
 
@@ -489,289 +504,7 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
       },
     },
 
-    // ── Serena: file tools ────────────────────────────────────────────────────
-    {
-      type: "function",
-      function: {
-        name: "read_file",
-        description:
-          "Read a specific line range of a file. " +
-          "ONLY use this when you already know the exact lines you need from a prior symbol lookup. " +
-          "NEVER use this to explore or understand a file — use get_symbols_overview then find_symbol instead. " +
-          "NEVER read an entire source file; always supply start_line and end_line.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            start_line: {
-              type: "number",
-              description: "0-based index of the first line to retrieve. Defaults to 0.",
-            },
-            end_line: {
-              type: "number",
-              description: "0-based index of the last line (inclusive). Omit to read until end of file.",
-            },
-          },
-          required: ["relative_path"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "create_text_file",
-        description:
-          "Create or overwrite a text file in the project directory. " +
-          "Prefer replace_content or symbol-level tools for targeted edits to existing files.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            content: {
-              type: "string",
-              description: "Complete file content to write.",
-            },
-          },
-          required: ["relative_path", "content"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "replace_content",
-        description:
-          "Replace content in a file using a literal string or regex pattern. " +
-          "Preferred for file-level edits when symbol-level tools are not appropriate. " +
-          "Use mode='regex' with wildcards (e.g. 'start.*?end') to avoid specifying large verbatim blocks.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            needle: {
-              type: "string",
-              description: "String or regex pattern to search for.",
-            },
-            repl: {
-              type: "string",
-              description:
-                "Replacement string. In regex mode supports backreferences as $!1, $!2, etc.",
-            },
-            mode: {
-              type: "string",
-              enum: ["literal", "regex"],
-              description: "Whether needle is treated as a literal string or a regex (Python re, DOTALL+MULTILINE).",
-            },
-            allow_multiple_occurrences: {
-              type: "boolean",
-              description: "Whether to allow replacing multiple occurrences. Defaults to false.",
-            },
-          },
-          required: ["relative_path", "needle", "repl", "mode"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "delete_lines",
-        description:
-          "Delete a range of lines from a file. " +
-          "Requires reading the same range first with read_file to verify correctness. " +
-          "Prefer symbol-level tools when editing a named symbol.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            start_line: {
-              type: "number",
-              description: "0-based index of the first line to delete.",
-            },
-            end_line: {
-              type: "number",
-              description: "0-based index of the last line to delete (inclusive).",
-            },
-          },
-          required: ["relative_path", "start_line", "end_line"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "replace_lines",
-        description:
-          "Replace a range of lines in a file with new content. " +
-          "Requires reading the same range first with read_file to verify correctness. " +
-          "Prefer symbol-level tools when editing a named symbol.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            start_line: {
-              type: "number",
-              description: "0-based index of the first line to replace.",
-            },
-            end_line: {
-              type: "number",
-              description: "0-based index of the last line to replace (inclusive).",
-            },
-            content: {
-              type: "string",
-              description: "New content to insert in place of the deleted lines.",
-            },
-          },
-          required: ["relative_path", "start_line", "end_line", "content"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "insert_at_line",
-        description:
-          "Insert content at a specific line in a file, pushing the existing line down. " +
-          "Useful for small targeted edits inside a long symbol body. " +
-          "Prefer insert_after_symbol or insert_before_symbol when the target is a named symbol.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the file from the project root.",
-            },
-            line: {
-              type: "number",
-              description: "0-based index of the line to insert content at.",
-            },
-            content: {
-              type: "string",
-              description: "Content to insert.",
-            },
-          },
-          required: ["relative_path", "line", "content"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "list_dir",
-        description: "List files and directories in a given project directory.",
-        parameters: {
-          type: "object",
-          properties: {
-            relative_path: {
-              type: "string",
-              description: "Relative path to the directory. Use '.' to list the project root.",
-            },
-            recursive: {
-              type: "boolean",
-              description: "Whether to scan subdirectories recursively.",
-            },
-            skip_ignored_files: {
-              type: "boolean",
-              description: "Whether to skip gitignored files and directories.",
-            },
-          },
-          required: ["relative_path", "recursive"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "find_file",
-        description:
-          "Find files matching a filename pattern (glob) within the project directory.",
-        parameters: {
-          type: "object",
-          properties: {
-            file_mask: {
-              type: "string",
-              description: "Filename or file mask (supports * and ? wildcards), e.g. '*.ts' or 'index.*'.",
-            },
-            relative_path: {
-              type: "string",
-              description: "Directory to search in. Use '.' for the project root.",
-            },
-          },
-          required: ["file_mask", "relative_path"],
-          additionalProperties: false,
-        },
-      },
-    },
-    {
-      type: "function",
-      function: {
-        name: "search_for_pattern",
-        description:
-          "Search for a regex pattern across project files when you don't know the symbol name. " +
-          "If you know the symbol name, use find_symbol instead — it's faster and more precise. " +
-          "NEVER use execute_shell_command with grep/rg for code search — always use this tool.",
-        parameters: {
-          type: "object",
-          properties: {
-            substring_pattern: {
-              type: "string",
-              description:
-                "Regex pattern to search for (Python re, DOTALL enabled). " +
-                "Avoid .* at start/end; use .*? in the middle for non-greedy multi-line matches.",
-            },
-            context_lines_before: {
-              type: "number",
-              description: "Lines of context to include before each match. Defaults to 0.",
-            },
-            context_lines_after: {
-              type: "number",
-              description: "Lines of context to include after each match. Defaults to 0.",
-            },
-            paths_include_glob: {
-              type: "string",
-              description: "Glob pattern for files to include (e.g. 'src/**/*.ts'). Empty means all non-ignored files.",
-            },
-            paths_exclude_glob: {
-              type: "string",
-              description: "Glob pattern for files to exclude (e.g. '**/*.test.ts').",
-            },
-            relative_path: {
-              type: "string",
-              description: "Restrict search to this subdirectory (relative path). Empty means entire project.",
-            },
-            restrict_search_to_code_files: {
-              type: "boolean",
-              description: "If true, only search files recognized as code (not docs, configs, etc.). Defaults to false.",
-            },
-          },
-          required: ["substring_pattern"],
-          additionalProperties: false,
-        },
-      },
-    },
-
-    // ── Serena: symbol tools ──────────────────────────────────────────────────
+// ── Serena: symbol tools ──────────────────────────────────────────────────
     {
       type: "function",
       function: {
@@ -794,7 +527,7 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         description:
           "Get a structural index of all symbols (classes, functions, methods) in a file or directory — names and line numbers only, no code content. " +
           "This is your PRIMARY entry point for any codebase exploration. " +
-          "ALWAYS call this before read_file or find_symbol when you don't yet know where something is. " +
+          "ALWAYS call this before read_text_file or find_symbol when you don't yet know where something is. " +
           "Costs a fraction of a file read.",
         parameters: {
           type: "object",
@@ -819,7 +552,7 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         name: "find_symbol",
         description:
           "Read the exact source of a symbol (function, method, class) by name. " +
-          "Use this instead of read_file whenever you know what symbol you want — it returns only that symbol's code, nothing else. " +
+          "Use this instead of read_text_file whenever you know what symbol you want — it returns only that symbol's code, nothing else. " +
           "Name path format: 'MyClass/my_method' or just 'my_method'. Prefix with '/' for absolute path.",
         parameters: {
           type: "object",
@@ -1423,7 +1156,7 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         description:
           "Fast text and regex search across the codebase using ripgrep. " +
           "Use this when you know a string or regex pattern but not which file contains it. " +
-          "Respects .gitignore automatically. Much faster than search_for_pattern. " +
+          "Respects .gitignore automatically. Primary text search tool. " +
           "For structural code search (e.g. find all functions matching a shape), use ast_grep_search instead. " +
           "For known symbol names, use find_symbol instead.",
         parameters: {
@@ -1506,6 +1239,277 @@ export function getTools(options: PromptToolOptions = {}): ToolDefinition[] {
         },
       },
     });
+  }
+
+  // ── IDA Pro MCP tools (dynamically discovered) ──────────────────────────
+  if (options.idaMcpEnabled) {
+    const idaTools = options.idaMcpTools ?? [];
+    for (const tool of idaTools) {
+      tools.push({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: (tool.inputSchema as any) ?? { type: "object", properties: {}, additionalProperties: false },
+        },
+      });
+    }
+  }
+
+  // ── Cheat Engine MCP tools (dynamically discovered) ─────────────────────
+  if (options.ceMcpEnabled) {
+    const ceTools = options.ceMcpTools ?? [];
+    for (const tool of ceTools) {
+      tools.push({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: (tool.inputSchema as any) ?? { type: "object", properties: {}, additionalProperties: false },
+        },
+      });
+    }
+  }
+
+  // ── codebase-memory-mcp tools (dynamically discovered) ───────────────────
+  if (options.codebaseMemoryEnabled) {
+    const cbTools = options.codebaseMemoryTools ?? [];
+    for (const tool of cbTools) {
+      tools.push({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: (tool.inputSchema as any) ?? { type: "object", properties: {}, additionalProperties: false },
+        },
+      });
+    }
+  }
+
+  // ── filesystem MCP tools (dynamically discovered) ─────────────────────────
+  // ── filesystem MCP tools (always enabled; dynamic discovery enriches schemas) ─
+  if (true) {
+    const fsTools = options.filesystemTools ?? [];
+    const hasDiscovered = fsTools.length > 0;
+
+    // Start with static essential schemas so the model always knows about these tools
+    // before the MCP server has fully started.
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "read_text_file",
+          description:
+            "Read the complete contents of a file from the file system as text. " +
+            "Handles various text encodings and provides detailed error messages. " +
+            "Use the 'head' parameter to read only the first N lines, or 'tail' for the last N lines. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the file to read (absolute or relative)." },
+              head: { type: "number", description: "If provided, return only the first N lines." },
+              tail: { type: "number", description: "If provided, return only the last N lines." },
+            },
+            required: ["path"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "read_multiple_files",
+          description:
+            "Read the contents of multiple files simultaneously. More efficient than reading " +
+            "files one by one. Each file's content is returned with its path as a reference. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              paths: {
+                type: "array",
+                items: { type: "string" },
+                minItems: 1,
+                description: "Array of file paths to read.",
+              },
+            },
+            required: ["paths"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "write_file",
+          description:
+            "Create a new file or completely overwrite an existing file with new content. " +
+            "Use with caution as it will overwrite existing files without warning. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the file (absolute or relative)." },
+              content: { type: "string", description: "Content to write to the file." },
+            },
+            required: ["path", "content"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "edit_file",
+          description:
+            "Make line-based edits to a text file. Each edit replaces exact text with new content. " +
+            "Returns a git-style diff showing the changes made. Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the file to edit." },
+              edits: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    oldText: { type: "string", description: "Text to search for — must match exactly." },
+                    newText: { type: "string", description: "Text to replace with." },
+                  },
+                  required: ["oldText", "newText"],
+                },
+                description: "Array of edit operations to apply.",
+              },
+              dryRun: { type: "boolean", description: "Preview changes using git-style diff format." },
+            },
+            required: ["path", "edits"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "list_directory",
+          description:
+            "Get a detailed listing of all files and directories in a specified path. " +
+            "Results distinguish between files and directories with [FILE] and [DIR] prefixes. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the directory to list." },
+            },
+            required: ["path"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "search_files",
+          description:
+            "Recursively search for files and directories matching a glob pattern. " +
+            "Returns full paths to all matching items. Only searches within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Directory to search in." },
+              pattern: { type: "string", description: "Glob pattern to match, e.g. '*.ts' or '**/*.cpp'." },
+              excludePatterns: {
+                type: "array",
+                items: { type: "string" },
+                description: "Glob patterns to exclude from results.",
+              },
+            },
+            required: ["path", "pattern"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "create_directory",
+          description:
+            "Create a new directory or ensure a directory exists. Creates nested directories. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the directory to create." },
+            },
+            required: ["path"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "move_file",
+          description:
+            "Move or rename files and directories. Can move between directories and rename. " +
+            "Both source and destination must be within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              source: { type: "string", description: "Source path." },
+              destination: { type: "string", description: "Destination path." },
+            },
+            required: ["source", "destination"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "get_file_info",
+          description:
+            "Retrieve detailed metadata about a file or directory: size, creation time, permissions, etc. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Path to the file or directory." },
+            },
+            required: ["path"],
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "directory_tree",
+          description:
+            "Get a recursive tree view of files and directories as a JSON structure. " +
+            "Only works within allowed directories.",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "Root directory for the tree." },
+              excludePatterns: {
+                type: "array",
+                items: { type: "string" },
+                description: "Glob patterns for files/dirs to exclude.",
+              },
+            },
+            required: ["path"],
+          },
+        },
+      },
+    );
+
+    // Append any additional dynamically discovered tools that aren't already in the list
+    if (hasDiscovered) {
+      const staticNames = new Set(tools.map((t: any) => t.function.name));
+      for (const tool of fsTools) {
+        if (staticNames.has(tool.name)) continue;
+        tools.push({
+          type: "function" as const,
+          function: {
+            name: tool.name,
+            description: tool.description ?? "",
+            parameters: tool.inputSchema ?? { type: "object" as const, properties: {} },
+          },
+        });
+      }
+    }
   }
 
   return tools;

@@ -51,7 +51,7 @@ export async function handleWebSearchTool(
     ok: false,
     name: "WebSearch",
     error:
-      "WebSearch requires a custom search script. Set \"webSearchTool\" in ~/.deepcode/settings.json."
+      "WebSearch requires a custom search script. Set \"webSearchTool\" in ~/.sbdt/settings.json."
   };
 }
 
