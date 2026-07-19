@@ -114,6 +114,6 @@ function renderInlineSpans(text: string): string {
   result = result.replace(/`([^`]+)`/g, (_, inner) => chalk.cyan(inner));
   result = result.replace(/\*\*([^*]+)\*\*/g, (_, inner) => chalk.bold(inner));
   result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, (_, inner) => chalk.italic(inner));
-  result = result.replace(/_([^_\n]+)_/g, (_, inner) => chalk.italic(inner));
+  result = result.replace(/(?<![a-zA-Z0-9])_([^_\n]+)_(?![a-zA-Z0-9])/g, (_, inner) => chalk.italic(inner));
   return result;
 }

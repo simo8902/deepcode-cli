@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { buildNotifyEnv, formatDurationSeconds, launchNotifyScript, type NotifySpawn } from "../notify";
 import { resolveSettings } from "../settings";
@@ -146,10 +146,47 @@ test("resolveSettings allows explicit thinkingEnabled to override model defaults
   assert.equal(resolved.thinkingEnabled, false);
 });
 
+test("resolveSettings enables prompt improvement by default and allows disabling it", () => {
+  const defaults = { model: "default-model", baseURL: "https://default.example.com" };
+
+  assert.equal(resolveSettings({}, defaults).promptImprovementEnabled, true);
+  assert.equal(resolveSettings({ promptImprovementEnabled: false }, defaults).promptImprovementEnabled, false);
+});
+
+test("resolveSettings defaults assistant tone to neutral and accepts direct and boundary", () => {
+  const defaults = { model: "default-model", baseURL: "https://default.example.com" };
+
+  assert.equal(resolveSettings({}, defaults).assistantTone, "neutral");
+  assert.equal(resolveSettings({ assistantTone: "direct" }, defaults).assistantTone, "direct");
+  assert.equal(resolveSettings({ assistantTone: "boundary" }, defaults).assistantTone, "boundary");
+});
+
+test("resolveSettings bounds max agent iterations and defaults to 64", () => {
+  const defaults = { model: "default-model", baseURL: "https://default.example.com" };
+
+  assert.equal(resolveSettings({}, defaults).maxAgentIterations, 64);
+  assert.equal(resolveSettings({ maxAgentIterations: 3 }, defaults).maxAgentIterations, 3);
+  assert.equal(resolveSettings({ maxAgentIterations: 0 }, defaults).maxAgentIterations, 1);
+  assert.equal(resolveSettings({ maxAgentIterations: 5000 }, defaults).maxAgentIterations, 1000);
+  assert.equal(resolveSettings({ maxAgentIterations: 3.5 }, defaults).maxAgentIterations, 64);
+});
+
+test("resolveSettings exposes a configured Hermes repository path", () => {
+  const defaults = { model: "default-model", baseURL: "https://default.example.com" };
+
+  assert.equal(resolveSettings({ hermesRepoDir: "  C:\\tools\\hermes  " }, defaults).hermesRepoDir, "C:\\tools\\hermes");
+});
+
+test("resolveSettings exposes a configured filesystem MCP entry point", () => {
+  const defaults = { model: "default-model", baseURL: "https://default.example.com" };
+
+  assert.equal(resolveSettings({ filesystemMcpPath: "  C:\\tools\\filesystem\\index.js  " }, defaults).filesystemMcpPath, "C:\\tools\\filesystem\\index.js");
+});
+
 test("resolveSettings defaults invalid reasoning effort to xhigh", () => {
   const resolved = resolveSettings(
     {
-      reasoningEffort: "medium" as never
+      reasoningEffort: "invalid" as never
     },
     {
       model: "default-model",
@@ -187,6 +224,7 @@ test("buildNotifyEnv injects DURATION", () => {
 });
 
 test("launchNotifyScript passes DURATION and falls back to /bin/sh for non-executable scripts", () => {
+  const originalPlatform = process.platform;
   const calls: Array<{
     command: string;
     args: string[];
@@ -209,7 +247,12 @@ test("launchNotifyScript passes DURATION and falls back to /bin/sh for non-execu
     };
   };
 
-  launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess);
+  Object.defineProperty(process, "platform", { value: "linux" });
+  try {
+    launchNotifyScript("/tmp/notify.sh", 2750, "/tmp/project", spawnProcess);
+  } finally {
+    Object.defineProperty(process, "platform", { value: originalPlatform });
+  }
 
   assert.equal(calls.length, 2);
   assert.equal(calls[0]?.command, "/tmp/notify.sh");

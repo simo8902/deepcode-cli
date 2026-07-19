@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { buildExitSummaryText } from "../ui";
 import type { SessionEntry, SessionMessage } from "../session";

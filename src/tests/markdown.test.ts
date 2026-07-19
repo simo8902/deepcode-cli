@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { renderMarkdown } from "../ui";
 
@@ -38,4 +38,14 @@ test("renderMarkdown handles plain text unchanged in stripped form", () => {
   const text = "hello world\nthis is a sentence";
   const result = stripAnsi(renderMarkdown(text));
   assert.equal(result, text);
+});
+
+test("renderMarkdown preserves underscores in filenames", () => {
+  const result = stripAnsi(renderMarkdown("The file is modeling_moss_audio.py"));
+  assert.equal(result, "The file is modeling_moss_audio.py");
+});
+
+test("renderMarkdown still applies italic for word-boundary underscores", () => {
+  const result = renderMarkdown("this is _important_ text");
+  assert.equal(stripAnsi(result), "this is important text");
 });

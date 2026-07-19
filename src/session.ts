@@ -3,24 +3,33 @@ import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
 import { createRequire } from "module";
-import { fileURLToPath } from "url";
 import matter from "gray-matter";
 import type { ChatCompletionMessageParam, ChatCompletionContentPart } from "openai/resources/chat/completions";
 import { launchNotifyScript } from "./notify";
 import { buildThinkingRequestOptions } from "./openai-thinking";
 import { DEEPSEEK_V4_MODELS } from "./model-capabilities";
-import { getCompactPrompt, getSystemPrompt, getTools, checkToolInstalled, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
-import { ToolExecutor, type CreateOpenAIClient } from "./tools/executor";
+import { getCompactPrompt, getSystemPrompt, getCodebaseMemoryGuidance, getTools, checkToolInstalled, AGENT_DRIFT_GUARD_SKILL } from "./prompt";
+import { ToolExecutor, type ApprovedToolCall, type ArchitectureGateResumeState, type CreateOpenAIClient, type ToolCall } from "./tools/executor";
 import { startIdaMcp, getDiscoveredIdaTools } from "./tools/ida-handler";
 import { startCeMcp, getDiscoveredCeTools, getPromptCeTools } from "./tools/ce-handler";
-import { getSerenaHealth } from "./tools/serena-client";
-import { startCodebaseMemoryMcp, getDiscoveredCodebaseMemoryTools, getCodebaseMemoryHealth } from "./tools/codebase-memory-handler";
+import { getSerenaClient, getSerenaHealth } from "./tools/serena-client";
 import { startFilesystemMcp, getDiscoveredFilesystemTools, getFilesystemHealth } from "./tools/filesystem-handler";
+import { startHermesMcp, getDiscoveredHermesTools, getHermesHealth, getHermesClient } from "./tools/hermes-handler";
 import { logApiError, logWarn } from "./error-logger";
 import { logOpenAIChatCompletionDebug, normalizeDebugError } from "./debug-logger";
-import type { ProviderPrivacyMode } from "./settings";
+import type { AssistantTone, NativeLlamaCppSettings, ProviderPrivacyMode } from "./settings";
 import { sanitizeForProviderStrict } from "./privacy-guard";
+import { LlamaCppPythonWorker, type NativeLlamaCppCompletion, type NativeLlamaProgress } from "./providers/llama-cpp-python";
+import {
+  buildGroundingContract,
+  buildGroundingPrompt,
+  mergeGroundingContract,
+  requiresArchitectureMapping,
+  type GroundingContract
+} from "./grounding";
+import { evaluateNudges, isVaguePrompt } from "./prompt-improver";
 
+import { startCodebaseMemoryMcp, getCodebaseMemoryHealth, getDiscoveredCodebaseMemoryTools } from "./tools/codebase-memory-handler";
 const MAX_SESSION_ENTRIES = 50;
 const DEFAULT_COMPACT_PROMPT_TOKEN_THRESHOLD = 128 * 1024;
 const DEEPSEEK_V4_COMPACT_PROMPT_TOKEN_THRESHOLD = 512 * 1024;
@@ -84,12 +93,7 @@ function accumulateUsage(current: unknown | null, next: unknown | null | undefin
 }
 
 function getExtensionRoot(): string {
-  if (typeof __dirname !== "undefined") {
-    return path.resolve(__dirname, "..");
-  }
-
-  const currentFilePath = fileURLToPath(import.meta.url);
-  return path.resolve(path.dirname(currentFilePath), "..");
+  return path.resolve(__dirname, "..");
 }
 
 function getTotalTokens(usage: unknown | null | undefined): number {
@@ -108,6 +112,18 @@ function isOpenRouterBaseURL(baseURL: string | undefined): boolean {
     return new URL(baseURL).hostname.toLowerCase() === "openrouter.ai";
   } catch {
     return baseURL.toLowerCase().includes("openrouter.ai");
+  }
+}
+
+function isLoopbackBaseURL(baseURL: string | undefined): boolean {
+  if (!baseURL) {
+    return false;
+  }
+  try {
+    const hostname = new URL(baseURL).hostname.toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+  } catch {
+    return false;
   }
 }
 
@@ -134,6 +150,8 @@ export type SessionEntry = {
   createTime: string;
   updateTime: string;
   processes: Map<string, { startTime: string; command: string }> | null;  // {pid: {startTime, command}}
+  grounding?: GroundingContract;
+  architectureGateCompleted?: ArchitectureGateResumeState;
 };
 
 export type SessionsIndex = {
@@ -174,22 +192,65 @@ export type UserPromptContent = {
   skills?: SkillInfo[];
 };
 
+type HermesMemoryMode = "conversation" | "coding" | "mixed";
+
+function detectHermesMemoryMode(userPrompt: UserPromptContent): HermesMemoryMode {
+  const text = userPrompt.text ?? "";
+  const skillText = (userPrompt.skills ?? [])
+    .map((skill) => `${skill.name} ${skill.description}`)
+    .join(" ");
+  const combined = `${text} ${skillText}`;
+  const codingSignal = /```|\b(?:code|coding|bug|debug|error|fix|function|class|compile|build|test|repo|repository|typescript|javascript|python|rust|cpp|c\+\+)\b|[A-Za-z]:[\\/]|\.(?:c|cc|cpp|h|hpp|cs|js|jsx|ts|tsx|py|rs|go|java)\b/i.test(combined);
+  const conversationSignal = /\b(?:chat|chitchat|feel(?:ing|ings)?|emotion(?:al)?|mood|personal|life|relationship|remember this about me)\b/i.test(combined);
+
+  if (codingSignal && conversationSignal) return "mixed";
+  if (codingSignal) return "coding";
+  return "conversation";
+}
+
+
+
+
+
+
+export type SkillSource = "user" | "project-local" | "project";
+export type SkillSelectionSource = "explicit" | "deterministic" | "llm";
+
 export type SkillInfo = {
   name: string;
   path: string;
   description: string;
+  source?: SkillSource;
+  commandName?: string;
+  isAmbiguous?: boolean;
+  selectionSource?: SkillSelectionSource;
   isLoaded?: boolean;
+};
+
+type InstructionSource = {
+  content: string;
+  displayPath: string;
+};
+
+type PromptTraceEphemeralContext = {
+  groundingInjected: boolean;
+  architectureGuidanceInjected: boolean;
+  nudgeInjected: boolean;
+  hermesMemoryInjected: boolean;
 };
 
 type SessionManagerOptions = {
   projectRoot: string;
   createOpenAIClient: CreateOpenAIClient;
-  getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string };
+  getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string; sideEffectConfirmationRequired?: boolean; promptImprovementEnabled?: boolean; maxAgentIterations?: number; assistantTone?: AssistantTone; filesystemMcpPath?: string };
   renderMarkdown: (text: string) => string;
   onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   onSessionEntryUpdated?: (entry: SessionEntry) => void;
   onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
-  onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
+  onToolCall?: (toolName: string, params: string) => void;
+  onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
+  warmMcpOnInit?: boolean;
+  enableHermesMemory?: boolean;
 };
 
 export type LlmStreamProgress = {
@@ -199,20 +260,31 @@ export type LlmStreamProgress = {
   estimatedTokens: number;
   formattedTokens: string;
   phase: "start" | "update" | "end";
+  detail?: string;
 };
 
 export class SessionManager {
+  private static readonly pendingPersistence = new Set<Promise<void>>();
   private readonly projectRoot: string;
   private readonly createOpenAIClient: CreateOpenAIClient;
-  private readonly getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string; systemPrompt?: string };
+  private readonly getResolvedSettings: () => { webSearchTool?: string; idaMcpUrl?: string; systemPrompt?: string; sideEffectConfirmationRequired?: boolean; promptImprovementEnabled?: boolean; maxAgentIterations?: number; assistantTone?: AssistantTone; filesystemMcpPath?: string };
   private readonly onAssistantMessage: (message: SessionMessage, shouldConnect: boolean) => void;
   private readonly onSessionEntryUpdated?: (entry: SessionEntry) => void;
   private readonly onLlmStreamProgress?: (progress: LlmStreamProgress) => void;
-  private readonly onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
+  private readonly onToolCall?: (toolName: string, params: string) => void;
+  private readonly onMcpHealth?: (health: { fs: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }) => void;
+  private readonly enableHermesMemory: boolean;
   private activeSessionId: string | null = null;
   private activePromptController: AbortController | null = null;
   private readonly sessionControllers = new Map<string, AbortController>();
   private readonly toolExecutor: ToolExecutor;
+  private readonly nativeLlamaWorker = new LlamaCppPythonWorker();
+  private readonly nativeSyncedMessageIds = new Map<string, Set<string>>();
+  private nativeLlamaActiveSessionId: string | null = null;
+  private nativeLlamaConfigKey: string | null = null;
+  private sessionsIndexCache: SessionsIndex | null = null;
+  private readonly messageCache = new Map<string, SessionMessage[]>();
+  private persistenceTail: Promise<void> = Promise.resolve();
 
   constructor(options: SessionManagerOptions) {
     this.projectRoot = options.projectRoot;
@@ -221,17 +293,41 @@ export class SessionManager {
     this.onAssistantMessage = options.onAssistantMessage;
     this.onSessionEntryUpdated = options.onSessionEntryUpdated;
     this.onLlmStreamProgress = options.onLlmStreamProgress;
+    this.onToolCall = options.onToolCall;
     this.onMcpHealth = options.onMcpHealth;
+    this.nativeLlamaWorker.setProgressListener((progress) => {
+      const cachedTokens = typeof progress.cachedTokens === "number" ? progress.cachedTokens : 0;
+      this.emitLlmStreamProgress(
+        "native:" + progress.event,
+        new Date().toISOString(),
+        cachedTokens,
+        "update",
+        this.nativeLlamaActiveSessionId ?? undefined,
+        this.formatNativeLlamaProgress(progress)
+      );
+    });
+    this.enableHermesMemory = options.enableHermesMemory !== false;
     this.toolExecutor = new ToolExecutor(this.projectRoot, this.createOpenAIClient);
+    if (options.warmMcpOnInit === false) {
+      return;
+    }
     void this.warmIdaMcp();
-    void this.warmCodebaseMemoryMcp();
+
     void this.warmFilesystemMcp();
+
+    void this.warmHermesMcp();
   }
 
   private estimateStreamTokens(text: string): number {
     let tokens = 0;
-    for (const char of text) {
-      tokens += /[\u3400-\u9fff\uf900-\ufaff]/u.test(char) ? 0.6 : 0.3;
+    for (let index = 0; index < text.length; index += 1) {
+      const codePoint = text.codePointAt(index) ?? 0;
+      if (codePoint > 0xffff) {
+        index += 1;
+      }
+      const isCjk = (codePoint >= 0x3400 && codePoint <= 0x9fff)
+        || (codePoint >= 0xf900 && codePoint <= 0xfaff);
+      tokens += isCjk ? 0.6 : 0.3;
     }
     return tokens;
   }
@@ -262,7 +358,8 @@ export class SessionManager {
     startedAt: string,
     estimatedTokens: number,
     phase: LlmStreamProgress["phase"],
-    sessionId?: string
+    sessionId?: string,
+    detail?: string
   ): void {
     this.onLlmStreamProgress?.({
       requestId,
@@ -270,8 +367,75 @@ export class SessionManager {
       startedAt,
       estimatedTokens: Math.round(estimatedTokens),
       formattedTokens: this.formatEstimatedTokens(estimatedTokens),
-      phase
+      phase,
+      ...(detail ? { detail } : {})
     });
+  }
+
+  private formatNativeLlamaProgress(progress: NativeLlamaProgress): string {
+    const cachedTokens = typeof progress.cachedTokens === "number"
+      ? "KV " + this.formatEstimatedTokens(progress.cachedTokens)
+      : null;
+    if (progress.event === "worker_started") return "worker spawn: Python native backend";
+    if (progress.event === "model_load_started") {
+      const config = progress.config && typeof progress.config === "object"
+        ? progress.config as Record<string, unknown>
+        : null;
+      const context = typeof config?.nCtx === "number" ? this.formatEstimatedTokens(config.nCtx) : "?";
+      const kvK = typeof config?.kvTypeK === "string" ? config.kvTypeK : "f16";
+      const kvV = typeof config?.kvTypeV === "string" ? config.kvTypeV : "f16";
+      const model = typeof config?.modelPath === "string" ? path.basename(config.modelPath) : "?";
+      const gpuLayers = typeof config?.nGpuLayers === "number" ? String(config.nGpuLayers) : "?";
+      const flash = config?.flashAttn !== false ? "on" : "off";
+      const mmap = config?.useMmap === false ? "off" : "on";
+      const batch = typeof config?.nBatch === "number" ? String(config.nBatch) : "default";
+      const maxTokens = typeof config?.maxTokens === "number" ? String(config.maxTokens) : "default";
+      return "model load: " + model
+        + " | ctx " + context
+        + " | GPU layers " + gpuLayers
+        + " | KV " + kvK + "/" + kvV
+        + " | flash " + flash
+        + " | mmap " + mmap
+        + " | batch " + batch
+        + " | max " + maxTokens;
+    }
+    if (progress.event === "model_load_complete") {
+      const context = typeof progress.context_tokens === "number"
+        ? this.formatEstimatedTokens(progress.context_tokens)
+        : "?";
+      const initialMessages = typeof progress.initial_messages === "number" ? String(progress.initial_messages) : "?";
+      const chars = typeof progress.initial_payload_chars === "number" ? String(progress.initial_payload_chars) : "?";
+      return "model ready: ctx " + context + " | initial messages " + initialMessages + " | payload chars " + chars;
+    }
+    if (progress.event === "context_appended") {
+      const chars = typeof progress.payload_chars === "number" ? String(progress.payload_chars) : "?";
+      const history = typeof progress.history_messages === "number" ? String(progress.history_messages) : "?";
+      return "context append: " + String(progress.messages ?? 0) + " message(s) | chars " + chars + " | history " + history;
+    }
+    if (progress.event === "inference_started") {
+      const history = typeof progress.history_messages === "number" ? String(progress.history_messages) : "?";
+      return "inference start: " + (cachedTokens ?? "KV 0") + " | history " + history + " message(s)";
+    }
+    if (progress.event === "waiting") {
+      const seconds = typeof progress.elapsedSeconds === "number" ? String(progress.elapsedSeconds) + "s" : "";
+      const request = typeof progress.request === "string" ? progress.request : "request";
+      return request + " running" + (seconds ? " | " + seconds : "");
+    }
+    if (progress.event === "inference_complete") {
+      const usage = progress.usage && typeof progress.usage === "object"
+        ? progress.usage as Record<string, unknown>
+        : null;
+      const prompt = typeof usage?.prompt_tokens === "number" ? this.formatEstimatedTokens(usage.prompt_tokens) : "?";
+      const completion = typeof usage?.completion_tokens === "number" ? this.formatEstimatedTokens(usage.completion_tokens) : "?";
+      const total = typeof usage?.total_tokens === "number" ? this.formatEstimatedTokens(usage.total_tokens) : "?";
+      return "inference complete: prompt " + prompt + " | generated " + completion + " | total " + total;
+    }
+    if (progress.event === "request_complete") {
+      const request = typeof progress.request === "string" ? progress.request : "request";
+      const elapsed = typeof progress.elapsedMs === "number" ? (progress.elapsedMs / 1_000).toFixed(2) + "s" : "?";
+      return request + " transport complete | " + elapsed;
+    }
+    return progress.event;
   }
 
   private isAbortLikeError(error: unknown): boolean {
@@ -607,36 +771,239 @@ export class SessionManager {
   }
 
   private logFinalHttpBody(
-    requestId: string,
-    sessionId: string | undefined,
-    body: Record<string, unknown>,
-    providerPrivacyMode: ProviderPrivacyMode,
-    providerRedactedSensitiveContent: boolean
-  ): void {
-    if (process.env[FINAL_HTTP_BODY_LOG_ENV] !== "true") {
-      return;
-    }
+  requestId: string,
+  sessionId: string | undefined,
+  body: Record<string, unknown>,
+  providerPrivacyMode: ProviderPrivacyMode,
+  providerRedactedSensitiveContent: boolean
+): void {
+  this.appendPromptTrace(
+    requestId,
+    sessionId,
+    body,
+    providerPrivacyMode,
+    providerRedactedSensitiveContent
+  );
 
-    try {
-      const logPath = path.join(os.homedir(), ".sbdt", "logs", "final-http-body.jsonl");
-      fs.mkdirSync(path.dirname(logPath), { recursive: true });
-      fs.appendFileSync(
-        logPath,
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          requestId,
-          sessionId,
-          boundary: "before client.chat.completions.create",
-          providerPrivacyMode,
-          providerRedactedSensitiveContent,
-          body
-        }) + "\n",
-        "utf8"
-      );
-    } catch {
-      // Boundary logging must never affect the request path.
-    }
+  if (process.env[FINAL_HTTP_BODY_LOG_ENV] !== "true") {
+    return;
   }
+
+  try {
+    const logPath = path.join(os.homedir(), ".sbdt", "logs", "final-http-body.jsonl");
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(
+      logPath,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        requestId,
+        sessionId,
+        boundary: "before client.chat.completions.create",
+        providerPrivacyMode,
+        providerRedactedSensitiveContent,
+        body
+      }) + "\n",
+      "utf8"
+    );
+  } catch {
+    // Boundary logging must never affect the request path.
+  }
+}
+
+private appendPromptTrace(
+  requestId: string,
+  sessionId: string | undefined,
+  body: Record<string, unknown>,
+  providerPrivacyMode: ProviderPrivacyMode,
+  providerRedactedSensitiveContent: boolean
+): void {
+  if (!sessionId) {
+    return;
+  }
+
+  try {
+    const { projectDir } = this.getProjectStorage();
+    const tracePath = path.join(projectDir, `${sessionId}.prompt-trace.md`);
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    const requestOptions = Object.fromEntries(
+      Object.entries(body).filter(([key]) => key !== "messages" && key !== "tools")
+    );
+    const lines = [
+      `## Model request — ${new Date().toISOString()}`,
+      `Request ID: ${requestId}`,
+      `Provider privacy mode: ${providerPrivacyMode}`,
+      `Sensitive content redacted: ${providerRedactedSensitiveContent ? "yes" : "no"}`,
+      "",
+      "### Messages seen by model",
+      ""
+    ];
+
+    messages.forEach((message, index) => {
+      const record = isUsageRecord(message) ? message : {};
+      const role = typeof record.role === "string" ? record.role : "unknown";
+      const content = record.content;
+      const contentText = typeof content === "string"
+        ? content
+        : JSON.stringify(content ?? null, null, 2);
+      lines.push(`#### Message ${index + 1} — ${role}`, "<content>", contentText, "</content>", "");
+    });
+
+    lines.push(
+      "### Tools seen by model",
+      "```json",
+      JSON.stringify(body.tools ?? [], null, 2),
+      "```",
+      "",
+      "### Request options",
+      "```json",
+      JSON.stringify(requestOptions, null, 2),
+      "```",
+      "",
+      "---",
+      ""
+    );
+
+    this.appendProjectFile(tracePath, lines.join("\n") + "\n", `prompt trace for ${sessionId}`);
+  } catch {
+    // Prompt tracing must never affect the request path.
+  }
+}
+
+private appendPromptInputTrace(sessionId: string, prompt: UserPromptContent): void {
+  try {
+    const { projectDir } = this.getProjectStorage();
+    const tracePath = path.join(projectDir, `${sessionId}.prompt-trace.md`);
+    const lines = [
+      `## User prompt — ${new Date().toISOString()}`,
+      "<prompt-text>",
+      prompt.text ?? "",
+      "</prompt-text>",
+      "",
+      "### Attachments",
+      prompt.imageUrls && prompt.imageUrls.length > 0
+        ? JSON.stringify(prompt.imageUrls, null, 2)
+        : "(none)",
+      "",
+      "### Selected skills",
+      prompt.skills && prompt.skills.length > 0
+        ? JSON.stringify(prompt.skills, null, 2)
+        : "(none)",
+      "",
+      "---",
+      ""
+    ];
+
+    this.appendProjectFile(tracePath, lines.join("\n") + "\n", `prompt input trace for ${sessionId}`);
+  } catch {
+    // Prompt tracing must never affect the request path.
+  }
+}
+
+private appendPromptAssemblyTrace(
+  sessionId: string,
+  agentInstructions: InstructionSource[],
+  selectedSkills: SkillInfo[],
+  ephemeralContext: PromptTraceEphemeralContext
+): void {
+  try {
+    const { projectDir } = this.getProjectStorage();
+    const tracePath = path.join(projectDir, `${sessionId}.prompt-trace.md`);
+    const toolOptions = this.getPromptToolOptions();
+    const filesystem = getFilesystemHealth(this.projectRoot);
+    const serena = getSerenaHealth(this.projectRoot);
+    const hermes = getHermesHealth();
+    const codebaseMemory = getCodebaseMemoryHealth(this.projectRoot);
+    const instructionSources = [
+      { priority: 1, kind: "host policy", source: "src/prompt.ts:getSystemPrompt", role: "system" },
+      { priority: 2, kind: "default skill", source: "src/prompt.ts:AGENT_DRIFT_GUARD_SKILL", role: "system" },
+      ...agentInstructions.map((instruction, index) => ({
+        priority: 3 + index,
+        kind: "project or user instructions",
+        source: instruction.displayPath,
+        role: "system"
+      })),
+      ...selectedSkills.map((skill) => ({
+        priority: 3 + agentInstructions.length,
+        kind: `selected skill: ${skill.name}`,
+        source: skill.path,
+        role: "system"
+      })),
+      { priority: 4 + agentInstructions.length, kind: "current user request", source: "current turn", role: "user" }
+    ];
+    const toolReadiness = {
+      filesystem: { ready: filesystem.ready, error: filesystem.error ?? null, discoveredTools: toolOptions.filesystemTools.map((tool) => tool.name) },
+      serena: { ready: serena.ready, error: serena.error ?? null },
+      hermes: { ready: hermes.ready, error: hermes.error ?? null, discoveredTools: toolOptions.hermesTools.map((tool) => tool.name) },
+      codebaseMemory: { ready: codebaseMemory.ready, error: codebaseMemory.error ?? null, discoveredTools: toolOptions.codebaseMemoryTools.map((tool) => tool.name) },
+      ida: { configured: toolOptions.idaMcpEnabled, discoveredTools: toolOptions.idaMcpTools.map((tool) => tool.name) },
+      cheatEngine: { configured: toolOptions.ceMcpEnabled, discoveredTools: toolOptions.ceMcpTools.map((tool) => tool.name) },
+      ripgrep: { available: toolOptions.ripgrepEnabled },
+      astGrep: { available: toolOptions.astGrepEnabled },
+      webSearch: { available: toolOptions.webSearchEnabled }
+    };
+    const lines = [
+      `## Prompt assembly — ${new Date().toISOString()}`,
+      "",
+      "### Instruction sources",
+      ...instructionSources.map((source) => `- ${source.priority}. ${source.kind} [${source.role}] — ${source.source}`),
+      "",
+      "### Ephemeral context",
+      `- Grounding contract: ${ephemeralContext.groundingInjected ? "injected" : "not injected"}`,
+      `- Architecture guidance: ${ephemeralContext.architectureGuidanceInjected ? "injected" : "not injected"}`,
+      `- Prompt-improvement nudge: ${ephemeralContext.nudgeInjected ? "injected" : "not injected"}`,
+      `- Hermes memory: ${ephemeralContext.hermesMemoryInjected ? "injected" : "not injected"}`,
+      "Ephemeral context is appended after the fixed host, instruction, and skill system block.",
+      "",
+      "### Tool capability snapshot",
+      JSON.stringify(toolReadiness, null, 2),
+      "",
+      "### Selected skills",
+      selectedSkills.length > 0
+        ? selectedSkills.map((skill) =>
+          `- ${skill.name} [${skill.source ?? "unknown"}; ${skill.selectionSource ?? "existing"}] — ${skill.path}`
+        ).join("\n")
+        : "(none)",
+      "",
+      "---",
+      ""
+    ];
+
+    this.appendProjectFile(tracePath, lines.join("\n") + "\n", `prompt assembly trace for ${sessionId}`);
+  } catch {
+    // Prompt tracing must never affect the request path.
+  }
+}
+
+private appendToolExecutionTrace(
+  sessionId: string,
+  executions: Array<{
+    toolCallId: string;
+    result: { ok: boolean; name: string; metadata?: Record<string, unknown> };
+  }>
+): void {
+  if (executions.length === 0) {
+    return;
+  }
+
+  try {
+    const { projectDir } = this.getProjectStorage();
+    const tracePath = path.join(projectDir, `${sessionId}.prompt-trace.md`);
+    const lines = [
+      `## Tool execution provenance — ${new Date().toISOString()}`,
+      "",
+      ...executions.map((execution) => {
+        const retry = execution.result.metadata?.retry ?? "not reported";
+        return `- ${execution.result.name} (${execution.toolCallId}): ${execution.result.ok ? "ok" : "failed"}; retry: ${String(retry)}`;
+      }),
+      "",
+      "---",
+      ""
+    ];
+    this.appendProjectFile(tracePath, lines.join("\n") + "\n", `tool execution trace for ${sessionId}`);
+  } catch {
+    // Prompt tracing must never affect the request path.
+  }
+}
 
   async identifyMatchingSkillNames(
     skills: SkillInfo[],
@@ -653,7 +1020,7 @@ Response in JSON format:
 \`\`\`\n
 If none of the available skills match, respond with an empty array, i.e. \`{"skillNames": []}\`.\n
 The candidate skills are as follows:\n\n`;
-    const simpleSkills = skills.filter((x) => !x.isLoaded).map((x) => {
+    const simpleSkills = skills.filter((x) => !x.isLoaded && !x.isAmbiguous).map((x) => {
       return {name: x.name, description: x.description};
     })
     if (simpleSkills.length === 0) {
@@ -661,7 +1028,13 @@ The candidate skills are as follows:\n\n`;
     }
     systemPrompt += "```\n" + JSON.stringify(simpleSkills, null, 2) + "\n```";
     
-    const { client, model, baseURL, debugLogEnabled, providerPrivacyMode } = this.createOpenAIClient();
+    const { client, model, baseURL, debugLogEnabled, providerPrivacyMode, nativeLlamaCpp } = this.createOpenAIClient();
+    // Native mode owns one persistent agent context. Do not invoke the legacy
+    // OpenAI skill-classifier endpoint before that worker is initialized.
+    // Explicit and deterministic skill selection remain available.
+    if (nativeLlamaCpp) {
+      return [];
+    }
     if (!client) {
       return [];
     }
@@ -707,9 +1080,8 @@ The candidate skills are as follows:\n\n`;
     const agentsRoot = path.join(homeDir, ".agents", "skills");
     const legacyProjectSkillsRoot = path.join(this.projectRoot, ".sbdt", "skills");
     const projectAgentsSkillsRoot = path.join(this.projectRoot, ".agents", "skills");
-    const skillsByName = new Map<string, SkillInfo>();
 
-    const collectSkills = (root: string, displayRoot: string): SkillInfo[] => {
+    const collectSkills = (root: string, displayRoot: string, source: SkillSource): SkillInfo[] => {
       if (!fs.existsSync(root)) {
         return [];
       }
@@ -738,34 +1110,46 @@ The candidate skills are as follows:\n\n`;
         } catch {
           continue;
         }
-        results.push(this.readSkillInfo(skillPath, `${displayRoot}/${skillName}/SKILL.md`, skillName));
+        results.push(this.readSkillInfo(skillPath, `${displayRoot}/${skillName}/SKILL.md`, skillName, source));
       }
       return results;
     };
 
-    for (const skill of collectSkills(agentsRoot, "~/.agents/skills")) {
-      skillsByName.set(skill.name, skill);
+    const skills = [
+      ...collectSkills(agentsRoot, "~/.agents/skills", "user"),
+      ...collectSkills(legacyProjectSkillsRoot, "./.sbdt/skills", "project-local"),
+      ...collectSkills(projectAgentsSkillsRoot, "./.agents/skills", "project")
+    ];
+    const skillsByName = new Map<string, SkillInfo[]>();
+    for (const skill of skills) {
+      const key = skill.name.toLowerCase();
+      const group = skillsByName.get(key) ?? [];
+      group.push(skill);
+      skillsByName.set(key, group);
     }
-    for (const skill of collectSkills(legacyProjectSkillsRoot, "./.sbdt/skills")) {
-      skillsByName.set(skill.name, skill);
-    }
-    for (const skill of collectSkills(projectAgentsSkillsRoot, "./.agents/skills")) {
-      skillsByName.set(skill.name, skill);
+
+    for (const group of skillsByName.values()) {
+      if (group.length < 2) {
+        continue;
+      }
+      for (const skill of group) {
+        skill.isAmbiguous = true;
+        skill.commandName = this.getQualifiedSkillCommandName(skill);
+      }
     }
 
     if (sessionId) {
       const loadedSkillKeys = this.getLoadedSkillKeys(sessionId);
-      for (const skill of skillsByName.values()) {
-        if (
-          loadedSkillKeys.has(this.getSkillKey(skill))
-          || loadedSkillKeys.has(this.getSkillKeyByName(skill.name))
-        ) {
+      for (const skill of skills) {
+        if (loadedSkillKeys.has(this.getSkillKey(skill))) {
           skill.isLoaded = true;
         }
       }
     }
 
-    return Array.from(skillsByName.values()).sort((a, b) => a.name.localeCompare(b.name));
+    return skills.sort((a, b) =>
+      (a.commandName ?? a.name).localeCompare(b.commandName ?? b.name)
+    );
   }
 
   private resolveSkillPath(skillPath: string): string {
@@ -787,11 +1171,17 @@ The candidate skills are as follows:\n\n`;
     return path.join(os.homedir(), skillPath);
   }
 
-  private readSkillInfo(skillPath: string, displayPath: string, fallbackName: string): SkillInfo {
+  private readSkillInfo(
+    skillPath: string,
+    displayPath: string,
+    fallbackName: string,
+    source: SkillSource
+  ): SkillInfo {
     const fallbackSkill: SkillInfo = {
       name: fallbackName.replace(/_/g, "-"),
       path: displayPath,
       description: "",
+      source,
     };
 
     try {
@@ -803,6 +1193,7 @@ The candidate skills are as follows:\n\n`;
             ? parsed.data.name.trim()
             : fallbackSkill.name,
         path: displayPath,
+        source,
         description:
           typeof parsed.data.description === "string"
             ? parsed.data.description.trim()
@@ -821,6 +1212,12 @@ The candidate skills are as follows:\n\n`;
     return `name:${name}`;
   }
 
+  private getQualifiedSkillCommandName(skill: SkillInfo): string {
+    const segments = skill.path.replace(/\\/g, "/").split("/");
+    const directory = segments.length >= 2 ? segments[segments.length - 2] : skill.name;
+    return `${skill.name}@${skill.source ?? "unknown"}-${directory}`.toLowerCase();
+  }
+
   private getLoadedSkillKeys(sessionId: string): Set<string> {
     const loadedSkillKeys = new Set<string>();
     for (const message of this.listSessionMessages(sessionId)) {
@@ -828,7 +1225,6 @@ The candidate skills are as follows:\n\n`;
         continue;
       }
       loadedSkillKeys.add(this.getSkillKey(message.meta.skill));
-      loadedSkillKeys.add(this.getSkillKeyByName(message.meta.skill.name));
     }
     return loadedSkillKeys;
   }
@@ -866,7 +1262,9 @@ The candidate skills are as follows:\n\n`;
     const availableSkillsByKey = new Map<string, SkillInfo>();
     for (const skill of availableSkills) {
       availableSkillsByKey.set(this.getSkillKey(skill), skill);
-      availableSkillsByKey.set(this.getSkillKeyByName(skill.name), skill);
+      if (!skill.isAmbiguous) {
+        availableSkillsByKey.set(this.getSkillKeyByName(skill.name), skill);
+      }
     }
 
     return dedupedSkills.map((skill) => {
@@ -883,6 +1281,55 @@ The candidate skills are as follows:\n\n`;
         isLoaded: Boolean(matchedSkill.isLoaded || skill.isLoaded),
       };
     });
+  }
+
+  private matchSkillsDeterministically(skills: SkillInfo[], userPrompt: string): SkillInfo[] {
+    const prompt = userPrompt.toLowerCase();
+    const promptWords = new Set(prompt.match(/[a-z0-9][a-z0-9_-]*/g) ?? []);
+
+    return skills
+      .filter((skill) => !skill.isLoaded && !skill.isAmbiguous)
+      .map((skill) => {
+        const normalizedName = skill.name.toLowerCase().replace(/[-_]+/g, " ");
+        const nameTokens = normalizedName.split(/\s+/).filter((token) => token.length >= 3);
+        const exactNameMatch = normalizedName.length >= 3 && prompt.includes(normalizedName);
+        const allNameTokensMatch = nameTokens.length > 0 && nameTokens.every((token) => promptWords.has(token));
+        return { skill, score: exactNameMatch ? 2 : allNameTokensMatch ? 1 : 0 };
+      })
+      .filter((match) => match.score > 0)
+      .sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name))
+      .map((match) => ({ ...match.skill, selectionSource: "deterministic" as const }));
+  }
+
+  private async resolveSkillsForPrompt(
+    requestedSkills: SkillInfo[] | undefined,
+    userPrompt: string,
+    options?: { signal?: AbortSignal; sessionId?: string }
+  ): Promise<SkillInfo[] | undefined> {
+    const explicitSkills = this.dedupeSkills(requestedSkills);
+    if (explicitSkills && explicitSkills.length > 0) {
+      return this.normalizeSkills(
+        explicitSkills.map((skill) => ({ ...skill, selectionSource: "explicit" as const })),
+        options?.sessionId
+      );
+    }
+    if (!userPrompt.trim()) {
+      return undefined;
+    }
+
+    const skills = await this.listSkills(options?.sessionId);
+    const deterministicSkills = this.matchSkillsDeterministically(skills, userPrompt);
+    if (deterministicSkills.length > 0) {
+      return this.normalizeSkills(deterministicSkills, options?.sessionId);
+    }
+
+    const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt, options);
+    this.throwIfAborted(options?.signal);
+    const matchedNames = new Set(skillNames.map((name) => name.toLowerCase()));
+    const llmSkills = skills
+      .filter((skill) => !skill.isAmbiguous && matchedNames.has(skill.name.toLowerCase()))
+      .map((skill) => ({ ...skill, selectionSource: "llm" as const }));
+    return this.normalizeSkills(llmSkills, options?.sessionId);
   }
 
   getActiveSessionId(): string | null {
@@ -914,161 +1361,430 @@ The candidate skills are as follows:\n\n`;
     }
   }
 
+private async maybeAskPromptImprovementQuestion(
+  sessionId: string,
+  userPrompt: UserPromptContent,
+  grounding?: GroundingContract
+): Promise<boolean> {
+  const clarificationReason = grounding?.unresolvedQuestions[0];
+  if (
+    this.getResolvedSettings().promptImprovementEnabled === false ||
+    !isVaguePrompt(userPrompt.text ?? "") ||
+    !clarificationReason
+  ) {
+    return false;
+  }
+
+  const {
+    client,
+    model,
+    baseURL,
+    thinkingEnabled,
+    reasoningEffort,
+    debugLogEnabled,
+    provider,
+    providerPrivacyMode,
+    zdr,
+    dataCollection,
+    nativeLlamaCpp
+  } = this.createOpenAIClient();
+  if (nativeLlamaCpp) {
+    return false;
+  }
+  if (!client) {
+    return false;
+  }
+
+  const questionTool = getTools(this.getPromptToolOptions()).find((tool) => {
+    const functionRecord = (tool as { function?: { name?: unknown } }).function;
+    return functionRecord?.name === "AskUserQuestion";
+  });
+  if (!questionTool) {
+    return false;
+  }
+
+  const recentContext = this.listSessionMessages(sessionId)
+    .filter((message) => message.role === "user" || message.role === "assistant")
+    .slice(-6)
+    .map((message) => `${message.role}: ${message.content ?? ""}`)
+    .join("\n")
+    .slice(-6000);
+  const selectedSkills = (userPrompt.skills ?? [])
+    .map((skill) => `${skill.name}: ${skill.description}`)
+    .join("\n");
+  const response = await this.createChatCompletionStream(
+    client,
+    {
+      model,
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are sbdt's prompt improver.",
+            "The user's request is underspecified. Do not answer it and do not write clarification questions as prose.",
+            "Generate the smallest useful set of grounded clarification questions, using the current request and recent context.",
+            "Ask only about requirements that cannot be inferred. Do not use a fixed checklist unless it genuinely fits.",
+            "Never ask for the repository, language, framework, path, or other fact that is already present in recent context or the grounding contract.",
+            `Clarification reason: ${clarificationReason}`,
+            `Grounding contract:\n${grounding ? buildGroundingPrompt(grounding) : "(not available)"}`,
+            "Your only assistant action must be a call to AskUserQuestion.",
+            "Ask one to three questions with concrete options and short tradeoffs.",
+            "If the request has multiple goals, ask which goal to prioritize first.",
+            `Selected skills:\n${selectedSkills || "(none)"}`,
+            `Recent context:\n${recentContext || "(none)"}`
+          ].join("\n\n")
+        },
+        { role: "user", content: userPrompt.text ?? "" }
+      ],
+      tools: [questionTool],
+      tool_choice: { type: "function", function: { name: "AskUserQuestion" } },
+      ...(thinkingEnabled
+        ? buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection)
+        : { temperature: 0 })
+    },
+    undefined,
+    sessionId,
+    {
+      enabled: debugLogEnabled,
+      location: "SessionManager.promptImprover",
+      baseURL,
+      params: { thinkingEnabled, reasoningEffort }
+    },
+    providerPrivacyMode
+  ).catch(() => null);
+
+  if (!response) {
+    return false;
+  }
+  const message = response.choices?.[0]?.message;
+  const rawToolCalls = (message as { tool_calls?: unknown[] } | undefined)?.tool_calls;
+  if (!Array.isArray(rawToolCalls) || rawToolCalls.length === 0) {
+    return false;
+  }
+
+  const clarificationNotice = this.buildAssistantMessage(
+    sessionId,
+    `Clarification needed before I can act: ${clarificationReason}`,
+    null
+  );
+  this.appendSessionMessage(sessionId, clarificationNotice);
+  this.onAssistantMessage(clarificationNotice, true);
+
+  const assistantMessage = this.buildAssistantMessage(sessionId, "", rawToolCalls);
+  this.appendSessionMessage(sessionId, assistantMessage);
+  this.onAssistantMessage(assistantMessage, true);
+
+  const toolResult = await this.appendToolMessages(sessionId, rawToolCalls, true);
+  if (!toolResult.waitingForUser) {
+    return false;
+  }
+
+  this.updateSessionEntry(sessionId, (entry) => ({
+    ...entry,
+    status: "waiting_for_user",
+    failReason: null,
+    updateTime: new Date().toISOString()
+  }));
+  return true;
+}
+
   async createSession(userPrompt: UserPromptContent, controller?: AbortController): Promise<string> {
-    this.reportNewPrompt();
-    const signal = controller?.signal;
-    this.throwIfAborted(signal);
-    this.applyInitCommandPrompt(userPrompt);
+  this.reportNewPrompt();
+  const signal = controller?.signal;
+  this.throwIfAborted(signal);
+  this.applyInitCommandPrompt(userPrompt);
 
-    if (userPrompt.text) {
-      const skills = await this.listSkills();
-      const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal });
-      this.throwIfAborted(signal);
-      const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
+  userPrompt.skills = await this.resolveSkillsForPrompt(userPrompt.skills, userPrompt.text ?? "", { signal });
+  this.throwIfAborted(signal);
+  const sessionId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const initialGrounding = buildGroundingContract(
+    sessionId,
+    userPrompt.text ?? "",
+    [],
+    undefined,
+    this.getResolvedSettings().sideEffectConfirmationRequired
+  );
+  if (initialGrounding.architectureMappingRequired) {
+    await this.ensureArchitectureTooling(signal);
+  }
+  const index = this.loadSessionsIndex();
+  const entry: SessionEntry = {
+    id: sessionId,
+    summary: userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]",
+    assistantReply: null,
+    assistantThinking: null,
+    assistantRefusal: null,
+    toolCalls: null,
+    status: "pending",
+    failReason: null,
+    usage: null,
+    lastResponseUsage: null,
+    activeTokens: 0,
+    createTime: now,
+    updateTime: now,
+    processes: null,
+    grounding: initialGrounding
+  };
+  index.entries.push(entry);
+  const sortedEntries = index.entries
+    .slice()
+    .sort((a, b) => {
+      const aTime = Date.parse(a.updateTime);
+      const bTime = Date.parse(b.updateTime);
+      if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+        return b.updateTime.localeCompare(a.updateTime);
       }
-    }
-    userPrompt.skills = await this.normalizeSkills(userPrompt.skills);
-    this.throwIfAborted(signal);
-    const sessionId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const index = this.loadSessionsIndex();
-    const entry: SessionEntry = {
-      id: sessionId,
-      summary: userPrompt.text ? userPrompt.text.slice(0, 100) : "[Image Prompt]",
-      assistantReply: null,
-      assistantThinking: null,
-      assistantRefusal: null,
-      toolCalls: null,
-      status: "pending",
-      failReason: null,
-      usage: null,
-      lastResponseUsage: null,
-      activeTokens: 0,
-      createTime: now,
-      updateTime: now,
-      processes: null
-    };
-    index.entries.push(entry);
-    const sortedEntries = index.entries
-      .slice()
-      .sort((a, b) => {
-        const aTime = Date.parse(a.updateTime);
-        const bTime = Date.parse(b.updateTime);
-        if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
-          return b.updateTime.localeCompare(a.updateTime);
-        }
-        return bTime - aTime;
-      });
-    const keptEntries = sortedEntries.slice(0, MAX_SESSION_ENTRIES);
-    const keptIds = new Set(keptEntries.map((item) => item.id));
-    const droppedEntries = sortedEntries.filter((item) => !keptIds.has(item.id));
-    index.entries = keptEntries;
-    this.saveSessionsIndex(index);
-    this.removeSessionMessages(droppedEntries.map((item) => item.id));
+      return bTime - aTime;
+    });
+  const keptEntries = sortedEntries.slice(0, MAX_SESSION_ENTRIES);
+  if (!keptEntries.some((item) => item.id === sessionId)) {
+    keptEntries.pop();
+    keptEntries.push(entry);
+  }
+  const keptIds = new Set(keptEntries.map((item) => item.id));
+  const droppedEntries = sortedEntries.filter((item) => !keptIds.has(item.id));
+  index.entries = keptEntries;
+  this.saveSessionsIndex(index);
+  await this.archiveSessionEntries(droppedEntries);
 
-    const agentInstructions = this.loadAgentInstructions();
-    const systemPrompt = getSystemPrompt(this.projectRoot, this.getPromptToolOptions());
-    const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
-    this.appendSessionMessage(sessionId, systemMessage);
+  const projectInitialization = this.getAutomaticProjectInitializationInstruction();
+  const agentInstructions = [
+    ...this.loadAgentInstructions(),
+    ...(projectInitialization ? [projectInitialization] : [])
+  ];
+  const systemPrompt = getSystemPrompt(this.projectRoot, this.getPromptToolOptions());
+  const systemMessage = this.buildSystemMessage(sessionId, systemPrompt);
+  this.appendSessionMessage(sessionId, systemMessage);
 
-    const defaultSkillPrompt = `Use the skill document below to assist the user:\n<agent-drift-guard-skill>${AGENT_DRIFT_GUARD_SKILL}</agent-drift-guard-skill>`;
-    const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
-    this.appendSessionMessage(sessionId, defaultSkillMessage);
+  const defaultSkillPrompt = `Use the skill document below to assist the user:\n<agent-drift-guard-skill>${AGENT_DRIFT_GUARD_SKILL}</agent-drift-guard-skill>`;
+  const defaultSkillMessage = this.buildSystemMessage(sessionId, defaultSkillPrompt);
+  this.appendSessionMessage(sessionId, defaultSkillMessage);
 
-    if (agentInstructions) {
-      const agentInstructionsMessage = this.buildSystemMessage(
-        sessionId,
-        this.renderForcedAgentInstructions(agentInstructions)
-      );
-      this.appendSessionMessage(sessionId, agentInstructionsMessage);
-    }
+  if (agentInstructions.length > 0) {
+    const agentInstructionsMessage = this.buildSystemMessage(
+      sessionId,
+      this.renderForcedAgentInstructions(agentInstructions)
+    );
+    this.appendSessionMessage(sessionId, agentInstructionsMessage);
+  }
 
-    const userMessage = this.buildUserMessage(sessionId, userPrompt);
-    this.appendSessionMessage(sessionId, userMessage);
+  const userMessage = this.buildUserMessage(sessionId, userPrompt);
+  this.appendSessionMessage(sessionId, userMessage);
 
-    if (userPrompt.skills && userPrompt.skills.length > 0) {
-      for (const skill of userPrompt.skills) {
-        if (skill.isLoaded) {
-          continue;
-        }
-        const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
-        const skillPrompt = `Use the skill document below to assist the user:\n
-<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">
-${skillMd}
-</${skill.name}-skill>`;
-        const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
-        this.appendSessionMessage(sessionId, skillMessage);
-        this.onAssistantMessage(skillMessage, true);
+  if (userPrompt.skills && userPrompt.skills.length > 0) {
+    for (const skill of userPrompt.skills) {
+      if (skill.isLoaded) {
+        continue;
       }
+      const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
+      const skillPrompt = `Use the skill document below to assist the user:\n\n<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">\n${skillMd}\n</${skill.name}-skill>`;
+      const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
+      this.appendSessionMessage(sessionId, skillMessage);
+      this.onAssistantMessage(skillMessage, true);
     }
+  }
 
-    this.activeSessionId = sessionId;
-    await this.activateSession(sessionId, controller);
+  this.activeSessionId = sessionId;
+  const grounding = this.getSession(sessionId)?.grounding ?? buildGroundingContract(
+    sessionId,
+    userPrompt.text ?? "",
+    [],
+    undefined,
+    this.getResolvedSettings().sideEffectConfirmationRequired
+  );
+  if (await this.maybeAskPromptImprovementQuestion(sessionId, userPrompt, grounding)) {
     return sessionId;
   }
 
+  const memoryPrompt = await this.getScopedHermesMemoryPrompt(userPrompt);
+  const nudgeContext = evaluateNudges(userPrompt.text ?? "");
+  const architectureGuidance = this.buildArchitectureGuidance(grounding);
+  this.appendPromptAssemblyTrace(sessionId, agentInstructions, userPrompt.skills ?? [], {
+    groundingInjected: true,
+    architectureGuidanceInjected: Boolean(architectureGuidance),
+    nudgeInjected: Boolean(nudgeContext),
+    hermesMemoryInjected: Boolean(memoryPrompt)
+  });
+  const ephemeralPrompt = [buildGroundingPrompt(grounding), architectureGuidance, nudgeContext, memoryPrompt]
+    .filter((prompt): prompt is string => Boolean(prompt))
+    .join("\n\n");
+  await this.activateSession(sessionId, controller, true, ephemeralPrompt || undefined);
+  return sessionId;
+}
+
   async replySession(sessionId: string, userPrompt: UserPromptContent, controller?: AbortController): Promise<void> {
-    const signal = controller?.signal;
-    this.throwIfAborted(signal);
-    this.applyInitCommandPrompt(userPrompt);
-    const now = new Date().toISOString();
-    const updated = this.updateSessionEntry(sessionId, (entry) => ({
-      ...entry,
-      status: "pending",
-      failReason: null,
-      updateTime: now
-    }));
+  const signal = controller?.signal;
+  this.throwIfAborted(signal);
+  this.applyInitCommandPrompt(userPrompt);
+  const now = new Date().toISOString();
+  const updated = this.updateSessionEntry(sessionId, (entry) => ({
+    ...entry,
+    status: "pending",
+    failReason: null,
+    updateTime: now
+  }));
 
-    if (!updated) {
-      await this.createSession(userPrompt, controller);
-      return;
-    }
-
-    this.reportNewPrompt();
-
-    if (userPrompt.text) {
-      const skills = await this.listSkills(sessionId);
-      const skillNames = await this.identifyMatchingSkillNames(skills, userPrompt.text, { signal, sessionId });
-      this.throwIfAborted(signal);
-      const skillSet = new Set(skillNames);
-      const matchedSkill = skills.filter((skill) => skillSet.has(skill.name));
-      if (Array.isArray(userPrompt.skills)) {
-        userPrompt.skills.push(...matchedSkill);
-      } else if (matchedSkill.length > 0) {
-        userPrompt.skills = matchedSkill;
-      }
-    }
-    userPrompt.skills = await this.normalizeSkills(userPrompt.skills, sessionId);
-    this.throwIfAborted(signal);
-
-    const userMessage = this.buildUserMessage(sessionId, userPrompt);
-    this.appendSessionMessage(sessionId, userMessage);
-
-    if (userPrompt.skills && userPrompt.skills.length > 0) {
-      for (const skill of userPrompt.skills) {
-        if (skill.isLoaded) {
-          continue;
-        }
-        const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
-        const skillPrompt = `Use the skill document below to assist the user:\n
-<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">
-${skillMd}
-</${skill.name}-skill>`;
-        const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
-        this.appendSessionMessage(sessionId, skillMessage);
-        this.onAssistantMessage(skillMessage, true);
-      }
-    }
-    this.activeSessionId = sessionId;
-    await this.activateSession(sessionId, controller);
+  if (!updated) {
+    await this.createSession(userPrompt, controller);
+    return;
   }
 
-  async activateSession(sessionId: string, controller?: AbortController): Promise<void> {
+  this.toolExecutor.restoreCompletedArchitectureGate(sessionId, updated.architectureGateCompleted);
+  this.reportNewPrompt();
+
+  const previousGrounding = this.getSession(sessionId)?.grounding;
+  const priorUserMessages = this.listSessionMessages(sessionId)
+    .filter((message) => message.role === "user" && !message.meta?.skill)
+    .map((message) => message.content ?? "")
+    .filter(Boolean);
+  const nextGrounding = mergeGroundingContract(
+    previousGrounding,
+    buildGroundingContract(
+      sessionId,
+      userPrompt.text ?? "",
+      priorUserMessages,
+      previousGrounding,
+      this.getResolvedSettings().sideEffectConfirmationRequired
+    )
+  );
+  this.updateSessionEntry(sessionId, (entry) => ({ ...entry, grounding: nextGrounding }));
+  this.toolExecutor.recordUserPrompt(sessionId, userPrompt.text ?? "");
+  if (nextGrounding.architectureMappingRequired) {
+    await this.ensureArchitectureTooling(signal);
+  }
+
+  userPrompt.skills = await this.resolveSkillsForPrompt(userPrompt.skills, userPrompt.text ?? "", { signal, sessionId });
+  this.throwIfAborted(signal);
+
+  const userMessage = this.buildUserMessage(sessionId, userPrompt);
+  this.appendSessionMessage(sessionId, userMessage);
+
+  if (userPrompt.skills && userPrompt.skills.length > 0) {
+    for (const skill of userPrompt.skills) {
+      if (skill.isLoaded) {
+        continue;
+      }
+      const skillMd = fs.readFileSync(this.resolveSkillPath(skill.path), "utf8");
+      const skillPrompt = `Use the skill document below to assist the user:\n\n<${skill.name}-skill path="${this.resolveSkillPath(skill.path)}">\n${skillMd}\n</${skill.name}-skill>`;
+      const skillMessage = this.buildSkillMessage(sessionId, skillPrompt, skill);
+      this.appendSessionMessage(sessionId, skillMessage);
+      this.onAssistantMessage(skillMessage, true);
+    }
+  }
+
+  const approvedToolCall = this.toolExecutor.takeApprovedToolCall(sessionId);
+  if (approvedToolCall) {
+    await this.replayApprovedToolCall(sessionId, approvedToolCall);
+  }
+
+  this.activeSessionId = sessionId;
+  if (await this.maybeAskPromptImprovementQuestion(sessionId, userPrompt, nextGrounding)) {
+    return;
+  }
+
+  const memoryPrompt = await this.getScopedHermesMemoryPrompt(userPrompt);
+  const nudgeContext = evaluateNudges(userPrompt.text ?? "");
+  const architectureGuidance = this.buildArchitectureGuidance(nextGrounding);
+  this.appendPromptAssemblyTrace(sessionId, this.loadAgentInstructions(), userPrompt.skills ?? [], {
+    groundingInjected: true,
+    architectureGuidanceInjected: Boolean(architectureGuidance),
+    nudgeInjected: Boolean(nudgeContext),
+    hermesMemoryInjected: Boolean(memoryPrompt)
+  });
+  const ephemeralPrompt = [buildGroundingPrompt(nextGrounding), architectureGuidance, nudgeContext, memoryPrompt]
+    .filter((prompt): prompt is string => Boolean(prompt))
+    .join("\n\n");
+  await this.activateSession(sessionId, controller, false, ephemeralPrompt || undefined);
+}
+
+  private getNativeSyncedMessageIds(sessionId: string): Set<string> {
+    let synced = this.nativeSyncedMessageIds.get(sessionId);
+    if (!synced) {
+      synced = new Set<string>();
+      this.nativeSyncedMessageIds.set(sessionId, synced);
+    }
+    return synced;
+  }
+
+  private async createNativeLlamaCompletion(
+    sessionId: string,
+    config: NativeLlamaCppSettings,
+    thinkingEnabled: boolean,
+    ephemeralMemoryPrompt: string | undefined,
+    generation: { temperature?: number; topP?: number; repetitionPenalty?: number },
+    debugLogEnabled: boolean
+  ): Promise<NativeLlamaCppCompletion> {
+    const sessionMessages = this.listSessionMessages(sessionId).filter((message) => !message.compacted);
+    const configKey = JSON.stringify(config);
+    if (this.nativeLlamaConfigKey !== configKey) {
+      this.nativeSyncedMessageIds.clear();
+      this.nativeLlamaConfigKey = configKey;
+    }
+    if (this.nativeLlamaActiveSessionId !== sessionId) {
+      this.nativeSyncedMessageIds.delete(sessionId);
+      this.nativeLlamaActiveSessionId = sessionId;
+    }
+    const synced = this.getNativeSyncedMessageIds(sessionId);
+
+    if (synced.size === 0) {
+      const initialMessages = this.buildOpenAIMessages(
+        sessionMessages,
+        thinkingEnabled,
+        false,
+        ephemeralMemoryPrompt
+      );
+      await this.nativeLlamaWorker.initialize(
+        sessionId,
+        config,
+        initialMessages,
+        getTools(this.getPromptToolOptions()),
+        generation,
+        debugLogEnabled
+      );
+      for (const message of sessionMessages) {
+        synced.add(message.id);
+      }
+      return this.nativeLlamaWorker.complete(sessionId);
+    }
+
+    const unsynced = sessionMessages.filter((message) => !synced.has(message.id));
+    const lateInstructions = unsynced.filter((message) => message.role === "system");
+    const remainingMessages = unsynced.filter((message) => message.role !== "system");
+    const nativeMessages: ChatCompletionMessageParam[] = [];
+
+    // Strict Jinja templates reject a system message after the first turn. Keep
+    // late skill/tool guidance as explicit turn context without rebuilding the
+    // already-cached system prefix.
+    for (const message of lateInstructions) {
+      nativeMessages.push({
+        role: "user",
+        content: `<sbdt-instructions>\n${message.content ?? ""}\n</sbdt-instructions>`
+      } as ChatCompletionMessageParam);
+    }
+    if (ephemeralMemoryPrompt && remainingMessages.some((message) => message.role === "user")) {
+      nativeMessages.push({
+        role: "user",
+        content: `<sbdt-turn-context>\n${ephemeralMemoryPrompt}\n</sbdt-turn-context>`
+      } as ChatCompletionMessageParam);
+    }
+    for (const message of remainingMessages) {
+      nativeMessages.push(this.sessionMessageToOpenAIMessage(message, thinkingEnabled));
+    }
+
+    await this.nativeLlamaWorker.append(sessionId, nativeMessages);
+    for (const message of unsynced) {
+      synced.add(message.id);
+    }
+    return this.nativeLlamaWorker.complete(sessionId);
+  }
+
+  async activateSession(
+    sessionId: string,
+    controller?: AbortController,
+    isNewSession: boolean = false,
+    ephemeralMemoryPrompt?: string
+  ): Promise<void> {
     const startedAt = Date.now();
     const {
       client,
@@ -1082,11 +1798,15 @@ ${skillMd}
       providerPrivacyMode,
       zdr,
       dataCollection,
-      cacheControl
+      cacheControl,
+      temperature,
+      topP,
+      repetitionPenalty,
+      nativeLlamaCpp
     } = this.createOpenAIClient();
     const now = new Date().toISOString();
 
-    if (!client) {
+    if (!client && !nativeLlamaCpp) {
       this.updateSessionEntry(sessionId, (entry) => ({
         ...entry,
         status: "failed",
@@ -1120,9 +1840,10 @@ ${skillMd}
     }));
 
     this.sessionControllers.set(sessionId, sessionController);
+    const turnStartMessageId = this.getLatestUserPromptMessageId(sessionId);
 
     try {
-      const maxIterations = 80000;  // about 1K RMB cost
+      const maxIterations = this.getResolvedSettings().maxAgentIterations ?? 64;
       let toolCalls: unknown[] | null = null;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -1141,34 +1862,61 @@ ${skillMd}
           message.meta = { asThinking: true };
           this.onAssistantMessage(message, false);
           await this.compactSession(sessionId, sessionController.signal);
+          this.nativeSyncedMessageIds.delete(sessionId);
         }
 
-        const messages = this.buildOpenAIMessages(this.listSessionMessages(sessionId), thinkingEnabled, isOpenRouterBaseURL(baseURL) || cacheControl === true);
-        const thinkingOptions = buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection);
-        const response = await this.createChatCompletionStream(
-          client,
-          {
-            model,
-            messages,
-            tools: getTools(this.getPromptToolOptions()),
-            ...thinkingOptions
-          },
-          { signal: sessionController.signal },
-          sessionId,
-          {
-            enabled: debugLogEnabled,
-            location: "SessionManager.activateSession",
-            baseURL,
-            params: { iteration, thinkingEnabled, reasoningEffort }
-          },
-          providerPrivacyMode
-        );
+        const response: { choices?: Array<{ message?: Record<string, unknown> }>; usage?: unknown } = nativeLlamaCpp
+          ? await this.createNativeLlamaCompletion(
+            sessionId,
+            nativeLlamaCpp,
+            thinkingEnabled,
+            ephemeralMemoryPrompt,
+            { temperature, topP, repetitionPenalty },
+            debugLogEnabled === true
+          )
+          : await this.createChatCompletionStream(
+            client!,
+            {
+              model,
+              messages: this.buildOpenAIMessages(
+                this.listSessionMessages(sessionId),
+                thinkingEnabled,
+                isOpenRouterBaseURL(baseURL) || cacheControl === true,
+                ephemeralMemoryPrompt
+              ),
+              tools: getTools(this.getPromptToolOptions()),
+              ...(!thinkingEnabled ? {
+                temperature: temperature ?? 0.7,
+                ...(topP != null ? { top_p: topP } : {}),
+                ...(repetitionPenalty != null ? { repetition_penalty: repetitionPenalty } : {})
+              } : {}),
+              // A fresh local session must not attach to a compatible server's prior KV state.
+              ...(isNewSession && iteration === 0 && isLoopbackBaseURL(baseURL)
+                ? { cache_prompt: false }
+                : {}),
+              ...buildThinkingRequestOptions(thinkingEnabled, baseURL, reasoningEffort, provider, zdr, dataCollection)
+            },
+            { signal: sessionController.signal },
+            sessionId,
+            {
+              enabled: debugLogEnabled,
+              location: "SessionManager.activateSession",
+              baseURL,
+              params: { iteration, thinkingEnabled, reasoningEffort }
+            },
+            providerPrivacyMode
+          );
 
         const message = response.choices?.[0]?.message;
         const rawContent = message?.content;
-        const content = typeof rawContent === "string" ? rawContent : "";
         const rawToolCalls = (message as { tool_calls?: unknown[] } | undefined)?.tool_calls ?? null;
         toolCalls = Array.isArray(rawToolCalls) && rawToolCalls.length > 0 ? rawToolCalls : null;
+        const content = this.guardCompletionClaim(
+          sessionId,
+          typeof rawContent === "string" ? rawContent : "",
+          turnStartMessageId,
+          Boolean(toolCalls)
+        );
         const rawThinking = (message as { reasoning_content?: unknown } | undefined)?.reasoning_content;
         const thinking = typeof rawThinking === "string" ? rawThinking : null;
         const refusal = (message as { refusal?: string } | undefined)?.refusal ?? null;
@@ -1179,6 +1927,9 @@ ${skillMd}
         }
         const assistantMessage = this.buildAssistantMessage(sessionId, content, toolCalls, thinking);
         this.appendSessionMessage(sessionId, assistantMessage);
+        if (nativeLlamaCpp) {
+          this.getNativeSyncedMessageIds(sessionId).add(assistantMessage.id);
+        }
         this.onAssistantMessage(assistantMessage, true);
 
         let waitingForUser = false;
@@ -1231,7 +1982,11 @@ ${skillMd}
         updateTime: new Date().toISOString()
       }));
       this.onAssistantMessage(
-        this.buildAssistantMessage(sessionId, "The AI agent has taken several steps but hasn't reached a conclusion yet. Do you want to continue?", null),
+        this.buildAssistantMessage(
+          sessionId,
+          `The agent reached the ${maxIterations}-iteration limit without a final response. Increase \"maxAgentIterations\" in ~/.sbdt/settings.json or send a follow-up to continue.`,
+          null
+        ),
         false,
       )
     } catch (error) {
@@ -1314,7 +2069,10 @@ ${skillMd}
     this.throwIfAborted(signal);
     const rawLlmResponse = response.choices?.[0]?.message?.content;
     const llmResponse = typeof rawLlmResponse === "string" ? rawLlmResponse : "";
-    const compactedSummary = llmResponse.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").trim();
+    const compactedSummary = this.limitCompactedSummary(
+      llmResponse.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "").replace(/<\/?summary>/gi, "").trim(),
+      sessionMessages.slice(startIndex, endIndex)
+    );
 
     const now = new Date().toISOString();
     const responseUsage = response.usage ?? null;
@@ -1348,11 +2106,30 @@ ${skillMd}
     this.saveSessionMessages(sessionId, sessionMessages);
   }
 
-  private getPromptToolOptions(): { webSearchEnabled: boolean; ripgrepEnabled: boolean; astGrepEnabled: boolean; idaMcpEnabled: boolean; idaMcpTools: ReturnType<typeof getDiscoveredIdaTools>; ceMcpEnabled: boolean; ceMcpTools: ReturnType<typeof getPromptCeTools>; codebaseMemoryEnabled: boolean; codebaseMemoryTools: ReturnType<typeof getDiscoveredCodebaseMemoryTools>; filesystemEnabled: boolean; filesystemTools: ReturnType<typeof getDiscoveredFilesystemTools> } {
+  private limitCompactedSummary(summary: string, sourceMessages: SessionMessage[]): string {
+    const sourceWordCount = sourceMessages.reduce((count, message) => {
+      if (message.role === "tool" || typeof message.content !== "string") return count;
+      return count + message.content.trim().split(/\s+/).filter(Boolean).length;
+    }, 0);
+    const wordBudget = Math.max(1, Math.min(550, Math.floor(sourceWordCount / 3)));
+    const words = summary.split(/\s+/).filter(Boolean);
+    if (words.length <= wordBudget) return summary;
+
+    const marker = "[Summary truncated to the compaction budget.]";
+    const markerWordCount = marker.split(/\s+/).length;
+    if (wordBudget <= markerWordCount) return words.slice(0, wordBudget).join(" ");
+    return `${words.slice(0, wordBudget - markerWordCount).join(" ")}\n\n${marker}`;
+  }
+
+  private getPromptToolOptions(): { assistantTone?: AssistantTone; webSearchEnabled: boolean; ripgrepEnabled: boolean; astGrepEnabled: boolean; idaMcpEnabled: boolean; idaMcpTools: ReturnType<typeof getDiscoveredIdaTools>; ceMcpEnabled: boolean; ceMcpTools: ReturnType<typeof getPromptCeTools>; filesystemEnabled: boolean; filesystemTools: ReturnType<typeof getDiscoveredFilesystemTools>; hermesEnabled: boolean; hermesTools: ReturnType<typeof getDiscoveredHermesTools>; codebaseMemoryEnabled: boolean; codebaseMemoryTools: ReturnType<typeof getDiscoveredCodebaseMemoryTools> } {
     const ceTools = getPromptCeTools();
-    const cbTools = getDiscoveredCodebaseMemoryTools();
     const fsTools = getDiscoveredFilesystemTools(this.projectRoot);
+    // Memory is injected by sbdt with a prompt-scoped snapshot. Do not expose
+    // the unscoped snapshot tool, which would let the model load every domain.
+    const hermesTools = getDiscoveredHermesTools().filter((tool) => tool.name !== "get_memory_snapshot");
+    const codebaseMemoryTools = getDiscoveredCodebaseMemoryTools(this.projectRoot);
     return {
+      assistantTone: this.getResolvedSettings().assistantTone,
       webSearchEnabled: true,
       ripgrepEnabled: checkToolInstalled("rg"),
       astGrepEnabled: checkToolInstalled("sg"),
@@ -1360,28 +2137,136 @@ ${skillMd}
       idaMcpTools: getDiscoveredIdaTools(),
       ceMcpEnabled: ceTools.length > 0,
       ceMcpTools: ceTools,
-      codebaseMemoryEnabled: cbTools.length > 0,
-      codebaseMemoryTools: cbTools,
       filesystemEnabled: true,
       filesystemTools: fsTools,
+      hermesEnabled: hermesTools.length > 0,
+      hermesTools,
+      codebaseMemoryEnabled: codebaseMemoryTools.length > 0,
+      codebaseMemoryTools,
     };
   }
 
+  private async ensureArchitectureTooling(signal?: AbortSignal): Promise<void> {
+    this.throwIfAborted(signal);
+
+    try {
+      await getSerenaClient(this.projectRoot).ensureReady();
+    } catch (error) {
+      console.error("[sbdt] Serena architecture gate failed:", error instanceof Error ? error.message : String(error));
+    }
+
+    this.throwIfAborted(signal);
+    try {
+      await startCodebaseMemoryMcp(this.projectRoot);
+      this.toolExecutor.refreshCodebaseMemoryTools();
+    } catch (error) {
+      console.error("[sbdt] Codebase Memory architecture gate failed:", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private buildArchitectureGuidance(grounding: GroundingContract): string | undefined {
+    if (!grounding.architectureMappingRequired && !requiresArchitectureMapping(grounding.latestUserInput)) {
+      return undefined;
+    }
+
+    const serena = getSerenaHealth(this.projectRoot);
+    const codebaseMemory = getCodebaseMemoryHealth(this.projectRoot);
+    const codebaseMemoryTools = getDiscoveredCodebaseMemoryTools(this.projectRoot).map((tool) => tool.name);
+
+    return [
+      "<sbdt-cpp-architecture-gate>",
+      "This turn may touch C/C++ source or asks for architecture/dependency mapping.",
+      `Current project root: ${this.projectRoot}`,
+      `Serena readiness: ${serena.ready ? "ready" : `not ready (${serena.error ?? "unknown error"})`}`,
+      `Codebase Memory readiness: ${codebaseMemory.ready ? "ready" : `not ready (${codebaseMemory.error ?? "unknown error"})`}`,
+      `Codebase Memory tools discovered: ${codebaseMemoryTools.length > 0 ? codebaseMemoryTools.join(", ") : "none"}`,
+      "Before reading or editing C/C++ symbols: use Serena's initial_instructions for this project if it has not been called in this session.",
+      "For architecture, dependency, caller/callee, or impact questions: use Codebase Memory first — list_projects, index_status, index_repository when missing/stale, then get_architecture with languages/structure/dependencies.",
+      "For C/C++ indexing use index_repository with the current project root and mode=full when the index is absent or stale. Do not invent a project name or index state.",
+      "Only after the orientation gate use search_graph, trace_path, get_code_snippet, and then Serena symbol tools for exact source work.",
+      "If the required MCP or index is unavailable, say exactly which prerequisite failed and ask the user whether to continue with a limited fallback. Do not claim the architecture was mapped.",
+      "</sbdt-cpp-architecture-gate>"
+    ].join("\n");
+  }
+
   private warmFilesystemMcp(): void {
-    startFilesystemMcp(this.projectRoot).then(() => {
+    startFilesystemMcp(this.projectRoot, this.getResolvedSettings().filesystemMcpPath).then(() => {
       this.toolExecutor.refreshFilesystemTools();
     }).catch((err: unknown) => {
       console.error("[sbdt] MCP failed to start:", err instanceof Error ? err.message : String(err));
     });
   }
 
-  private warmCodebaseMemoryMcp(): void {
-    startCodebaseMemoryMcp().then(() => {
-      this.toolExecutor.refreshCodebaseMemoryTools();
+  private warmHermesMcp(): void {
+    startHermesMcp().then(() => {
+      this.toolExecutor.refreshHermesTools();
     }).catch((err: unknown) => {
-      console.error("[sbdt] MCP failed to start:", err instanceof Error ? err.message : String(err));
+      // Hermes is optional — silent failure unless HERMES_REPO_DIR is set
+      if (process.env.HERMES_REPO_DIR) {
+        console.error("[sbdt] Hermes MCP failed to start:", err instanceof Error ? err.message : String(err));
+      }
     });
   }
+
+  private async getScopedHermesMemoryPrompt(userPrompt: UserPromptContent): Promise<string | null> {
+    if (!this.enableHermesMemory) {
+      return null;
+    }
+    try {
+      let client = getHermesClient();
+      if (!client) {
+        try {
+          await startHermesMcp();
+          client = getHermesClient();
+        } catch {
+          return null;
+        }
+      }
+      if (!client) return null;
+
+      const result = await client.callTool("get_memory_snapshot", {});
+      const text = result.content
+        ?.filter((c: { type: string; text?: string }) => c.type === "text" && typeof c.text === "string")
+        .map((c: { text?: string }) => c.text)
+        .join("\n")
+        .trim();
+
+      if (!text) return null;
+
+      let snapshot: { memory?: string; user?: string; soul?: string };
+      try {
+        snapshot = JSON.parse(text);
+      } catch {
+        return null;
+      }
+
+      const mode = detectHermesMemoryMode(userPrompt);
+      const parts: string[] = [];
+      if (snapshot.soul) {
+        parts.push(`<hermes-identity>\n${snapshot.soul}\n</hermes-identity>`);
+      }
+      if ((mode === "coding" || mode === "mixed") && snapshot.memory) {
+        parts.push(`<hermes-memory-coding>\n${snapshot.memory}\n</hermes-memory-coding>`);
+      }
+      if ((mode === "conversation" || mode === "mixed") && snapshot.user) {
+        parts.push(`<hermes-memory-personal-emotional>\n${snapshot.user}\n</hermes-memory-personal-emotional>`);
+      }
+
+      if (parts.length === 0) return null;
+
+      const saveGuidance = mode === "conversation"
+        ? "For persistent memory, use target 'user' only for durable personal or emotional context, especially when the user explicitly asks you to remember it. Do not save temporary moods or session history."
+        : mode === "coding"
+          ? "For persistent memory, use target 'memory' only for durable coding, project, environment, or tooling facts. Do not save raw code, tool output, or temporary task progress."
+          : "For persistent memory, use target 'user' for durable personal or emotional context and target 'memory' for durable coding/project facts. Save only high-signal information or explicit remember requests.";
+
+      return `# Scoped Hermes Memory (${mode})\n\nOnly the memory domain relevant to this turn is loaded below. Session history is separate user-owned resume data and must never be copied into persistent memory.\n\n## Memory write policy\n${saveGuidance}\nIf uncertain, do not save.\n\n${parts.join("\n\n")}`;
+    } catch {
+      return null;
+    }
+  }
+
+  
 
   private warmIdaMcp(): void {
     const settings = this.getResolvedSettings();
@@ -1416,6 +2301,46 @@ ${skillMd}
     }
   }
 
+  async reconnectCodebaseMemory(): Promise<string> {
+    try {
+      await startCodebaseMemoryMcp(this.projectRoot);
+      this.toolExecutor.refreshCodebaseMemoryTools();
+      const activeSessionId = this.activeSessionId;
+      if (activeSessionId) {
+        const guidanceMarker = '<codebase-memory-guidance status="active">';
+        const sessionMessages = this.listSessionMessages(activeSessionId);
+        const firstSystemIndex = sessionMessages.findIndex((message) => message.role === "system");
+        if (firstSystemIndex >= 0) {
+          const firstSystemMessage = sessionMessages[firstSystemIndex];
+          let changed = false;
+          if (!firstSystemMessage.content?.includes(guidanceMarker)) {
+            sessionMessages[firstSystemIndex] = {
+              ...firstSystemMessage,
+              content: `${firstSystemMessage.content ?? ""}\n\n${getCodebaseMemoryGuidance(this.projectRoot)}`,
+              updateTime: new Date().toISOString()
+            };
+            changed = true;
+          }
+
+          const normalizedMessages = sessionMessages.filter((message, index) =>
+            index === firstSystemIndex ||
+            !(message.role === "system" && message.content?.includes(guidanceMarker))
+          );
+          if (normalizedMessages.length !== sessionMessages.length) {
+            changed = true;
+          }
+          if (changed) {
+            this.saveSessionMessages(activeSessionId, normalizedMessages);
+          }
+        }
+      }
+      return "Codebase Memory connected — " + getDiscoveredCodebaseMemoryTools(this.projectRoot).length + " tools available.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return "Codebase Memory connection failed: " + message;
+    }
+  }
+
   private reportNewPrompt(): void {
     // no-op: external reporting disabled
   }
@@ -1427,7 +2352,7 @@ ${skillMd}
     }
 
     const sessionId = this.activeSessionId;
-    if (sessionId) {
+    if (sessionId && !this.isInterrupted(sessionId)) {
       this.interruptSession(sessionId);
     }
   }
@@ -1484,6 +2409,28 @@ ${skillMd}
     return !this.sessionControllers.has(sessionId);
   }
 
+  private getLatestUserPromptMessageId(sessionId: string): string | null {
+    const messages = this.listSessionMessages(sessionId);
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === "user" && !message.meta?.skill) {
+        return message.id;
+      }
+    }
+    return null;
+  }
+
+  private guardCompletionClaim(
+    _sessionId: string,
+    content: string,
+    _turnStartMessageId: string | null,
+    _hasPendingToolCalls: boolean
+  ): string {
+    // Host verification flows through tool result metadata (verified flag + note).
+    // The model sees that and self-corrects. Do not modify user-visible content.
+    return content;
+  }
+
   listSessions(): SessionEntry[] {
     const index = this.loadSessionsIndex();
     return index.entries;
@@ -1495,6 +2442,10 @@ ${skillMd}
   }
 
   listSessionMessages(sessionId: string): SessionMessage[] {
+    const cached = this.messageCache.get(sessionId);
+    if (cached) {
+      return cached;
+    }
     const messagePath = this.getSessionMessagesPath(sessionId);
     if (!fs.existsSync(messagePath)) {
       return [];
@@ -1511,6 +2462,7 @@ ${skillMd}
         // ignore malformed line
       }
     }
+    this.messageCache.set(sessionId, messages);
     return messages;
   }
 
@@ -1553,18 +2505,41 @@ ${skillMd}
     return { projectCode, projectDir, sessionsIndexPath };
   }
 
-  private ensureProjectDir(): string {
-    const { projectDir } = this.getProjectStorage();
-    fs.mkdirSync(projectDir, { recursive: true });
-    return projectDir;
+  private enqueuePersistence(label: string, operation: () => Promise<void>): void {
+    const queued = this.persistenceTail
+      .then(operation)
+      .catch((error) => {
+        console.error(`[sbdt] Failed to persist ${label}:`, error instanceof Error ? error.message : String(error));
+      });
+    this.persistenceTail = queued;
+    SessionManager.pendingPersistence.add(queued);
+    void queued.finally(() => SessionManager.pendingPersistence.delete(queued));
+  }
+
+  async flushPersistence(): Promise<void> {
+    await this.persistenceTail;
+  }
+
+  static async flushAllPersistence(): Promise<void> {
+    await Promise.all(Array.from(SessionManager.pendingPersistence));
+  }
+
+  private appendProjectFile(pathname: string, content: string, label: string): void {
+    this.enqueuePersistence(label, async () => {
+      await fs.promises.mkdir(path.dirname(pathname), { recursive: true });
+      await fs.promises.appendFile(pathname, content, "utf8");
+    });
   }
 
   private loadSessionsIndex(): SessionsIndex {
+    if (this.sessionsIndexCache) {
+      return this.sessionsIndexCache;
+    }
     const { sessionsIndexPath } = this.getProjectStorage();
-    this.ensureProjectDir();
 
     if (!fs.existsSync(sessionsIndexPath)) {
-      return { version: 1, entries: [], originalPath: this.projectRoot };
+      this.sessionsIndexCache = { version: 1, entries: [], originalPath: this.projectRoot };
+      return this.sessionsIndexCache;
     }
 
     try {
@@ -1573,19 +2548,21 @@ ${skillMd}
       const entries = Array.isArray(parsed.entries)
         ? parsed.entries.map((entry) => this.normalizeSessionEntry(entry))
         : [];
-      return {
+      this.sessionsIndexCache = {
         version: 1,
         entries,
         originalPath: parsed.originalPath || this.projectRoot
       };
+      return this.sessionsIndexCache;
     } catch {
-      return { version: 1, entries: [], originalPath: this.projectRoot };
+      this.sessionsIndexCache = { version: 1, entries: [], originalPath: this.projectRoot };
+      return this.sessionsIndexCache;
     }
   }
 
   private saveSessionsIndex(index: SessionsIndex): void {
+    this.sessionsIndexCache = index;
     const { sessionsIndexPath } = this.getProjectStorage();
-    this.ensureProjectDir();
     const normalized = {
       version: 1,
       entries: index.entries.map((entry) => ({
@@ -1594,7 +2571,11 @@ ${skillMd}
       })),
       originalPath: this.projectRoot
     };
-    fs.writeFileSync(sessionsIndexPath, JSON.stringify(normalized, null, 2), "utf8");
+    const payload = JSON.stringify(normalized, null, 2);
+    this.enqueuePersistence("sessions index", async () => {
+      await fs.promises.mkdir(path.dirname(sessionsIndexPath), { recursive: true });
+      await fs.promises.writeFile(sessionsIndexPath, payload, "utf8");
+    });
   }
 
   private getSessionMessagesPath(sessionId: string): string {
@@ -1602,30 +2583,67 @@ ${skillMd}
     return path.join(projectDir, `${sessionId}.jsonl`);
   }
 
-  private removeSessionMessages(sessionIds: string[]): void {
-    for (const sessionId of sessionIds) {
-      const messagePath = this.getSessionMessagesPath(sessionId);
-      try {
-        if (fs.existsSync(messagePath)) {
-          fs.unlinkSync(messagePath);
-        }
-      } catch {
-        // ignore delete failures
+  private async archiveSessionEntries(entries: SessionEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+
+    await this.flushPersistence();
+
+    const { projectDir } = this.getProjectStorage();
+    const archiveDir = path.join(projectDir, "archive");
+    const archiveIndexPath = path.join(archiveDir, "sessions-index.json");
+    await fs.promises.mkdir(archiveDir, { recursive: true });
+
+    let archivedEntries: Array<Record<string, unknown>> = [];
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(archiveIndexPath, "utf8")) as { entries?: unknown };
+      if (Array.isArray(parsed.entries)) {
+        archivedEntries = parsed.entries.filter((entry): entry is Record<string, unknown> => (
+          entry !== null && typeof entry === "object"
+        ));
       }
+    } catch {
+      // Start a new archive index when none exists or the old one is malformed.
+    }
+
+    const archivedIds = new Set(archivedEntries.map((entry) => entry.id).filter((id): id is string => typeof id === "string"));
+    for (const entry of entries) {
+      this.messageCache.delete(entry.id);
+      await this.moveSessionArtifactToArchive(path.join(projectDir, `${entry.id}.jsonl`), path.join(archiveDir, `${entry.id}.jsonl`));
+      await this.moveSessionArtifactToArchive(path.join(projectDir, `${entry.id}.prompt-trace.md`), path.join(archiveDir, `${entry.id}.prompt-trace.md`));
+      if (!archivedIds.has(entry.id)) {
+        archivedEntries.push({ ...entry, processes: this.serializeProcesses(entry.processes) });
+        archivedIds.add(entry.id);
+      }
+    }
+
+    await fs.promises.writeFile(archiveIndexPath, JSON.stringify({ version: 1, entries: archivedEntries }, null, 2), "utf8");
+  }
+
+  private async moveSessionArtifactToArchive(sourcePath: string, archivePath: string): Promise<void> {
+    if (!fs.existsSync(sourcePath) || fs.existsSync(archivePath)) return;
+    try {
+      await fs.promises.rename(sourcePath, archivePath);
+    } catch (error) {
+      console.error("[sbdt] Failed to archive session artifact:", error instanceof Error ? error.message : String(error));
     }
   }
 
   private appendSessionMessage(sessionId: string, message: SessionMessage): void {
-    this.ensureProjectDir();
     const messagePath = this.getSessionMessagesPath(sessionId);
-    fs.appendFileSync(messagePath, `${JSON.stringify(message)}\n`, "utf8");
+    const cached = this.messageCache.get(sessionId) ?? this.listSessionMessages(sessionId);
+    cached.push(this.normalizeSessionMessage(message));
+    this.messageCache.set(sessionId, cached);
+    this.appendProjectFile(messagePath, `${JSON.stringify(message)}\n`, `session ${sessionId} messages`);
   }
 
   private saveSessionMessages(sessionId: string, messages: SessionMessage[]): void {
-    this.ensureProjectDir();
     const messagePath = this.getSessionMessagesPath(sessionId);
     const payload = messages.map((message) => JSON.stringify(message)).join("\n");
-    fs.writeFileSync(messagePath, payload ? `${payload}\n` : "", "utf8");
+    this.messageCache.set(sessionId, messages);
+    this.enqueuePersistence(`session ${sessionId} messages`, async () => {
+      await fs.promises.mkdir(path.dirname(messagePath), { recursive: true });
+      await fs.promises.writeFile(messagePath, payload ? `${payload}\n` : "", "utf8");
+    });
   }
 
   private updateSessionEntry(
@@ -1646,34 +2664,46 @@ ${skillMd}
   }
 
   private buildUserMessage(sessionId: string, prompt: UserPromptContent): SessionMessage {
-    const now = new Date().toISOString();
-    const imageParams =
-        prompt.imageUrls
-            ?.filter((url) => Boolean(url))
-            .map((url) => ({
-              type: "image_url",
-              image_url: { url }
-            })) ?? [];
+  const now = new Date().toISOString();
+  const imageParams =
+      prompt.imageUrls
+          ?.filter((url) => Boolean(url))
+          .map((url) => ({
+            type: "image_url",
+            image_url: { url }
+          })) ?? [];
 
-    return {
-      id: crypto.randomUUID(),
-      sessionId,
-      role: "user",
-      content: prompt.text ?? "",
-      contentParams: imageParams.length > 0 ? imageParams : null,
-      messageParams: null,
-      compacted: false,
-      visible: true,
-      createTime: now,
-      updateTime: now
-    };
-  }
+  this.appendPromptInputTrace(sessionId, prompt);
+
+  return {
+    id: crypto.randomUUID(),
+    sessionId,
+    role: "user",
+    content: prompt.text ?? "",
+    contentParams: imageParams.length > 0 ? imageParams : null,
+    messageParams: null,
+    compacted: false,
+    visible: true,
+    createTime: now,
+    updateTime: now
+  };
+}
 
   private applyInitCommandPrompt(userPrompt: UserPromptContent): void {
     if (userPrompt.text !== "/init") {
       return;
     }
     userPrompt.text = this.renderInitCommandPrompt();
+  }
+
+  private getAutomaticProjectInitializationInstruction(): InstructionSource | null {
+    if (this.loadProjectAgentInstructions().length > 0) {
+      return null;
+    }
+    return {
+      displayPath: "[automatic ./AGENTS.md bootstrap]",
+      content: `${this.renderInitCommandPrompt()}\n\nThis bootstrap is automatic. Create the project instruction file as part of this task, then continue with the user's original request in the same session.`
+    };
   }
 
   private renderInitCommandPrompt(): string {
@@ -1685,14 +2715,15 @@ ${skillMd}
   }
 
   private getEffectiveProjectAgentsMdFile(): string | null {
-    return this.loadProjectAgentInstructions()?.displayPath ?? null;
+    const displayPaths = this.loadProjectAgentInstructions().map((instruction) => instruction.displayPath);
+    return displayPaths.length > 0 ? displayPaths.join(", ") : null;
   }
 
-  private loadProjectAgentInstructions(): { content: string; displayPath: string } | null {
+  private loadProjectAgentInstructions(): InstructionSource[] {
     const candidatePaths = [
       {
-        absolutePath: path.join(this.projectRoot, ".sbdt", "SIMO.md"),
-        displayPath: "./.sbdt/SIMO.md"
+        absolutePath: path.join(this.projectRoot, "AGENTS.md"),
+        displayPath: "./AGENTS.md"
       },
       {
         absolutePath: path.join(this.projectRoot, "SIMO.md"),
@@ -1703,22 +2734,12 @@ ${skillMd}
         displayPath: "./.sbdt/AGENTS.md"
       },
       {
-        absolutePath: path.join(this.projectRoot, "AGENTS.md"),
-        displayPath: "./AGENTS.md"
+        absolutePath: path.join(this.projectRoot, ".sbdt", "SIMO.md"),
+        displayPath: "./.sbdt/SIMO.md"
       }
     ];
 
-    for (const candidatePath of candidatePaths) {
-      const content = this.readNonEmptyFile(candidatePath.absolutePath);
-      if (content) {
-        return {
-          content,
-          displayPath: candidatePath.displayPath
-        };
-      }
-    }
-
-    return null;
+    return this.loadInstructionSources(candidatePaths);
   }
 
   private readNonEmptyFile(filePath: string): string | null {
@@ -1733,23 +2754,42 @@ ${skillMd}
     }
   }
 
-  private loadAgentInstructions(): { content: string; displayPath: string } | null {
-    const projectInstructions = this.loadProjectAgentInstructions();
-    if (projectInstructions) {
-      return projectInstructions;
+  private loadInstructionSources(
+    candidates: Array<{ absolutePath: string; displayPath: string }>
+  ): InstructionSource[] {
+    const instructions: InstructionSource[] = [];
+    for (const candidate of candidates) {
+      const content = this.readNonEmptyFile(candidate.absolutePath);
+      if (content) {
+        instructions.push({ content, displayPath: candidate.displayPath });
+      }
     }
-
-    const userSimoPath = path.join(os.homedir(), ".sbdt", "SIMO.md");
-    const simoContent = this.readNonEmptyFile(userSimoPath);
-    if (simoContent) return { content: simoContent, displayPath: "~/.sbdt/SIMO.md" };
-
-    const userAgentsPath = path.join(os.homedir(), ".sbdt", "AGENTS.md");
-    const content = this.readNonEmptyFile(userAgentsPath);
-    return content ? { content, displayPath: "~/.sbdt/AGENTS.md" } : null;
+    return instructions;
   }
 
-  private renderForcedAgentInstructions(agentInstructions: { content: string; displayPath: string }): string {
-    return `You must follow the AGENTS.md instructions below for every turn in this session.\n\n<agents-md path="${agentInstructions.displayPath}">\n${agentInstructions.content}\n</agents-md>`;
+  private loadAgentInstructions(): InstructionSource[] {
+    const userInstructions = this.loadInstructionSources([
+      {
+        absolutePath: path.join(os.homedir(), ".sbdt", "AGENTS.md"),
+        displayPath: "~/.sbdt/AGENTS.md"
+      },
+      {
+        absolutePath: path.join(os.homedir(), ".sbdt", "SIMO.md"),
+        displayPath: "~/.sbdt/SIMO.md"
+      }
+    ]);
+    return [...userInstructions, ...this.loadProjectAgentInstructions()];
+  }
+
+  private renderForcedAgentInstructions(agentInstructions: InstructionSource[]): string {
+    return [
+      "Follow the instruction sources below for every turn. They are ordered from lower to higher project specificity; do not silently ignore a source.",
+      ...agentInstructions.map((instruction) => [
+        `<instruction-source path="${instruction.displayPath}">`,
+        instruction.content,
+        "</instruction-source>"
+      ].join("\n"))
+    ].join("\n\n");
   }
 
   private buildSystemMessage(
@@ -1777,12 +2817,12 @@ ${skillMd}
     return {
       id: crypto.randomUUID(),
       sessionId,
-      role: "user",
+      role: "system",
       content,
       contentParams: null,
       messageParams: null,
       compacted: false,
-      visible: true,
+      visible: false,
       createTime: now,
       updateTime: now,
       meta: { skill: { ...skill, isLoaded: true } },
@@ -1851,50 +2891,81 @@ ${skillMd}
 
   private async appendToolMessages(
     sessionId: string,
-    toolCalls: unknown[]
+    toolCalls: unknown[],
+    skipInterruptCheck: boolean = false,
+    approvedToolCallIds?: Set<string>
   ): Promise<{ waitingForUser: boolean }> {
-    const toolExecutions = await this.toolExecutor.executeToolCalls(sessionId, toolCalls, {
-      onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
+  const toolExecutions = await this.toolExecutor.executeToolCalls(sessionId, toolCalls, {
+    onProcessStart: (pid, command) => this.addSessionProcess(sessionId, pid, command),
       onProcessExit: (pid) => this.removeSessionProcess(sessionId, pid),
-      shouldStop: () => this.isInterrupted(sessionId)
-    });
-    if (this.isInterrupted(sessionId)) {
-      return { waitingForUser: false };
+      onToolCall: this.onToolCall,
+      shouldStop: skipInterruptCheck ? undefined : () => this.isInterrupted(sessionId),
+      grounding: this.getSession(sessionId)?.grounding ?? null,
+      approvedToolCallIds
+  });
+  this.persistCompletedArchitectureGate(sessionId);
+  this.appendToolExecutionTrace(sessionId, toolExecutions);
+  if (!skipInterruptCheck && this.isInterrupted(sessionId)) {
+    return { waitingForUser: false };
+  }
+  let waitingForUser = false;
+  const followUpMessages: SessionMessage[] = [];
+  for (const execution of toolExecutions) {
+    if (execution.result.awaitUserResponse === true) {
+      waitingForUser = true;
     }
-    let waitingForUser = false;
-    const followUpMessages: SessionMessage[] = [];
-    for (const execution of toolExecutions) {
-      if (execution.result.awaitUserResponse === true) {
-        waitingForUser = true;
+    const toolFunction = this.findToolFunction(toolCalls, execution.toolCallId);
+    const toolMessage = this.buildToolMessage(
+      sessionId,
+      execution.toolCallId,
+      execution.content,
+      toolFunction
+    );
+    this.appendSessionMessage(sessionId, toolMessage);
+    this.onAssistantMessage(toolMessage, true);
+
+    for (const followUpMessage of execution.result.followUpMessages ?? []) {
+      if (followUpMessage.role !== "system") {
+        continue;
       }
-      const toolFunction = this.findToolFunction(toolCalls, execution.toolCallId);
-      const toolMessage = this.buildToolMessage(
-        sessionId,
-        execution.toolCallId,
-        execution.content,
-        toolFunction
+      followUpMessages.push(
+        this.buildSystemMessage(
+          sessionId,
+          followUpMessage.content,
+          followUpMessage.contentParams ?? null
+        )
       );
-      this.appendSessionMessage(sessionId, toolMessage);
-      this.onAssistantMessage(toolMessage, true);
-
-      for (const followUpMessage of execution.result.followUpMessages ?? []) {
-        if (followUpMessage.role !== "system") {
-          continue;
-        }
-        followUpMessages.push(
-          this.buildSystemMessage(
-            sessionId,
-            followUpMessage.content,
-            followUpMessage.contentParams ?? null
-          )
-        );
-      }
     }
+  }
 
-    for (const followUpMessage of followUpMessages) {
-      this.appendSessionMessage(sessionId, followUpMessage);
-    }
+  for (const followUpMessage of followUpMessages) {
+    this.appendSessionMessage(sessionId, followUpMessage);
+  }
     return { waitingForUser };
+  }
+
+  private async replayApprovedToolCall(sessionId: string, approved: ApprovedToolCall): Promise<void> {
+    const { toolCall: storedToolCall, kind } = approved;
+    const toolCall: ToolCall = {
+      ...storedToolCall,
+      id: `${storedToolCall.id}:replay:${crypto.randomUUID()}`
+    };
+    const assistantMessage = this.buildAssistantMessage(sessionId, "", [toolCall]);
+    this.appendSessionMessage(sessionId, assistantMessage);
+    this.onAssistantMessage(assistantMessage, true);
+    const approvedSideEffectIds = kind === "side_effect" ? new Set([toolCall.id]) : undefined;
+    await this.appendToolMessages(sessionId, [toolCall], false, approvedSideEffectIds);
+  }
+
+  private persistCompletedArchitectureGate(sessionId: string): void {
+    if (!this.toolExecutor.isArchitectureGateComplete(sessionId)) {
+      return;
+    }
+    this.updateSessionEntry(sessionId, (entry) => (
+      entry.architectureGateCompleted === true
+        ? entry
+        : { ...entry, architectureGateCompleted: true }
+    ));
   }
 
   private applyMessageCacheControl(message: ChatCompletionMessageParam): void {
@@ -1911,10 +2982,13 @@ ${skillMd}
   private buildOpenAIMessages(
     messages: SessionMessage[],
     thinkingEnabled: boolean,
-    addCacheControl: boolean = false
+    addCacheControl: boolean = false,
+    ephemeralMemoryPrompt?: string
   ): ChatCompletionMessageParam[] {
-    const activeMessages = messages.filter((message) => !message.compacted);
-    const toolPairings = this.pairToolMessages(activeMessages);
+    const activeMessages = messages.filter((message) =>
+      !message.compacted &&
+      !(message.role === "system" && typeof message.content === "string" && message.content.includes("Hermes Agent — Persistent Memory Snapshot"))
+    );
     const openAIMessages: ChatCompletionMessageParam[] = [];
     const emittedToolCallIds = new Set<string>();
 
@@ -1926,14 +3000,32 @@ ${skillMd}
       leadingSystemContents.push(activeMessages[startIndex].content ?? "");
       startIndex += 1;
     }
-    if (leadingSystemContents.length > 1) {
+
+    // Recover sessions that received system follow-ups after the conversation
+    // had already started. Strict chat templates require all system content at
+    // the front, including non-Codebase-Memory follow-ups from tools.
+    const lateSystemContents = activeMessages
+      .slice(startIndex)
+      .filter((message) => message.role === "system")
+      .map((message) => message.content ?? "");
+    if (lateSystemContents.length > 0) {
+      leadingSystemContents.push(...lateSystemContents);
+    }
+    const normalizedMessages = activeMessages.filter((message, index) =>
+      index < startIndex || message.role !== "system"
+    );
+    const toolPairings = this.pairToolMessages(normalizedMessages);
+    if (ephemeralMemoryPrompt) {
+      const systemContents = [...leadingSystemContents, ephemeralMemoryPrompt];
+      openAIMessages.push({ role: "system", content: systemContents.join("\n\n") });
+    } else if (leadingSystemContents.length > 1) {
       openAIMessages.push({ role: "system", content: leadingSystemContents.join("\n\n") });
     } else if (leadingSystemContents.length === 1) {
       openAIMessages.push(this.sessionMessageToOpenAIMessage(activeMessages[0], thinkingEnabled));
     }
 
-    for (let index = startIndex; index < activeMessages.length; index += 1) {
-      const message = activeMessages[index];
+    for (let index = startIndex; index < normalizedMessages.length; index += 1) {
+      const message = normalizedMessages[index];
       if (message.role === "tool") {
         continue;
       }
@@ -1995,7 +3087,7 @@ ${skillMd}
 
         const pairedToolIndex = toolPairings.get(this.buildToolPairingKey(index, toolCallIndex));
         if (pairedToolIndex != null) {
-          openAIMessages.push(this.sessionMessageToOpenAIMessage(activeMessages[pairedToolIndex], thinkingEnabled));
+          openAIMessages.push(this.sessionMessageToOpenAIMessage(normalizedMessages[pairedToolIndex], thinkingEnabled));
           continue;
         }
 
@@ -2381,10 +3473,9 @@ ${skillMd}
     this.onMcpHealth(this.getAllMcpHealth());
   }
 
-  private getAllMcpHealth(): { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } } {
+  private getAllMcpHealth(): { fs: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } } {
     return {
       fs: getFilesystemHealth(this.projectRoot),
-      cb: getCodebaseMemoryHealth(),
       serena: getSerenaHealth(this.projectRoot),
     };
   }
@@ -2403,6 +3494,9 @@ ${skillMd}
 
   private normalizeSessionEntry(entry: unknown): SessionEntry {
     const value = (entry && typeof entry === "object") ? (entry as Record<string, unknown>) : {};
+    const grounding = value.grounding && typeof value.grounding === "object"
+      ? value.grounding as GroundingContract
+      : undefined;
     return {
       id: typeof value.id === "string" ? value.id : crypto.randomUUID(),
       summary: typeof value.summary === "string" ? value.summary : null,
@@ -2417,7 +3511,9 @@ ${skillMd}
       activeTokens: typeof value.activeTokens === "number" ? value.activeTokens : 0,
       createTime: typeof value.createTime === "string" ? value.createTime : new Date().toISOString(),
       updateTime: typeof value.updateTime === "string" ? value.updateTime : new Date().toISOString(),
-      processes: this.deserializeProcesses(value.processes)
+      processes: this.deserializeProcesses(value.processes),
+      grounding,
+      architectureGateCompleted: value.architectureGateCompleted === true ? true : undefined
     };
   }
 
@@ -2466,5 +3562,94 @@ ${skillMd}
       serialized[pid] = entry;
     }
     return serialized;
+  }
+
+  getSessionToolLog(sessionId: string): string {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      return "No active session found.";
+    }
+
+    // Load messages from JSONL file
+    const messagePath = this.getSessionMessagesPath(sessionId);
+    if (!fs.existsSync(messagePath)) {
+      return "No session messages found.";
+    }
+
+    const raw = fs.readFileSync(messagePath, "utf8");
+    const messages: SessionMessage[] = raw
+      .split(/\r?\n/)
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+
+    const toolCalls: Array<{ index: number; toolCallId: string | null; name: string; args: string; result: string }> = [];
+    const idToIndex = new Map<string, number>();
+
+    let toolIndex = 0;
+    for (const message of messages) {
+      if (message.role === "assistant" && message.messageParams) {
+        const params = message.messageParams as { tool_calls?: unknown[] };
+        const toolCallsData = params?.tool_calls;
+        if (Array.isArray(toolCallsData) && toolCallsData.length > 0) {
+          for (const tc of toolCallsData) {
+            if (tc && typeof tc === "object") {
+              const tcRecord = tc as { id?: unknown; function?: { name?: string; arguments?: string } };
+              const functionData = tcRecord.function;
+              if (functionData) {
+                const name = typeof functionData.name === "string" ? functionData.name : "unknown";
+                const args = typeof functionData.arguments === "string" ? functionData.arguments : "{}";
+                const tcId = typeof tcRecord.id === "string" ? tcRecord.id : null;
+                toolIndex++;
+                const entryIndex = toolCalls.length;
+                toolCalls.push({ index: toolIndex, toolCallId: tcId, name, args, result: "<pending>" });
+                if (tcId) {
+                  idToIndex.set(tcId, entryIndex);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (message.role === "tool" && message.content) {
+        const params = message.messageParams as { tool_call_id?: string };
+        const resultToolCallId = params?.tool_call_id;
+        if (resultToolCallId && idToIndex.has(resultToolCallId)) {
+          const matchIndex = idToIndex.get(resultToolCallId)!;
+          if (toolCalls[matchIndex].result === "<pending>") {
+            toolCalls[matchIndex].result = message.content;
+          }
+        } else {
+          // Fallback for legacy data missing tool_call_id: attach to first pending entry
+          const fallbackIndex = toolCalls.findIndex((tc) => tc.result === "<pending>");
+          if (fallbackIndex >= 0) {
+            toolCalls[fallbackIndex].result = message.content;
+          }
+        }
+      }
+    }
+
+    if (toolCalls.length === 0) {
+      return "No tool calls in this session yet.";
+    }
+
+    const lines: string[] = ["# Session Tool Log", ""];
+    for (const call of toolCalls) {
+      lines.push(`## Tool ${call.index}: ${call.name}`);
+      lines.push(`**Arguments:**`);
+      lines.push("```json");
+      lines.push(call.args);
+      lines.push("```");
+      lines.push("");
+      lines.push(`**Result:**`);
+      lines.push("```json");
+      lines.push(call.result.slice(0, 5000) + (call.result.length > 5000 ? "\n... (truncated)" : ""));
+      lines.push("```");
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+    }
+
+    return lines.join("\n");
   }
 }

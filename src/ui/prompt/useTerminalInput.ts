@@ -126,7 +126,28 @@ export function useTerminalInput(
     if (!isActive) {
       return;
     }
+    let pasteAccumulator = "";
+    let pasteTimer: ReturnType<typeof setTimeout> | null = null;
+
     const handleData = (data: Buffer | string) => {
+      const raw = String(data);
+
+      // Large chunk — likely a terminal paste. Accumulate briefly
+      // so multi-chunk pastes arrive as a single handler call.
+      if (raw.length > 200) {
+        pasteAccumulator += raw;
+        if (pasteTimer) clearTimeout(pasteTimer);
+        pasteTimer = setTimeout(() => {
+          const accumulated = pasteAccumulator;
+          pasteAccumulator = "";
+          pasteTimer = null;
+          const { input, key } = parseTerminalInput(accumulated);
+          handlerRef.current(input, key);
+        }, 5);
+        return;
+      }
+
+      // Normal keystroke — pass through immediately (zero latency)
       const { input, key } = parseTerminalInput(data);
       handlerRef.current(input, key);
     };
@@ -134,6 +155,7 @@ export function useTerminalInput(
     stdin?.on("data", handleData);
     return () => {
       stdin?.off("data", handleData);
+      if (pasteTimer) clearTimeout(pasteTimer);
     };
   }, [isActive, stdin]);
 }

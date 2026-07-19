@@ -1,4 +1,4 @@
-import { afterEach, test } from "node:test";
+import { afterEach, test } from "bun:test";
 import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
@@ -19,19 +19,17 @@ afterEach(() => {
   }
 });
 
-test("WebSearch executes the configured script with the query as one argument", async () => {
+test("WebSearch executes the configured JavaScript script with the query as one argument", async () => {
   const workspace = createTempWorkspace();
-  const scriptPath = path.join(workspace, "web-search.sh");
+  const scriptPath = path.join(workspace, "web-search.mjs");
   fs.writeFileSync(
     scriptPath,
     [
-      "#!/bin/sh",
-      "printf 'query=%s\\n' \"$1\"",
-      "printf 'cwd=%s\\n' \"$PWD\""
+      "console.log(`query=${process.argv[2]}`);",
+      "console.log(`cwd=${process.cwd()}`);"
     ].join("\n"),
     "utf8"
   );
-  fs.chmodSync(scriptPath, 0o755);
 
   const starts: Array<{ id: string | number; command: string }> = [];
   const exits: Array<string | number> = [];
@@ -55,12 +53,20 @@ test("WebSearch executes the configured script with the query as one argument", 
   assert.deepEqual(exits, [starts[0].id]);
 });
 
-test("WebSearch returns a configuration error when no script is configured", async () => {
+test("WebSearch uses built-in search when no script is configured", async () => {
   const workspace = createTempWorkspace();
   const fetchCalls: Array<{ input: string | URL; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
     fetchCalls.push({ input, init });
-    return { ok: true } as Response;
+    return {
+      ok: true,
+      text: async () => [
+        '<div class="result">',
+        '<a class="result__a" href="https://nodejs.org/">Node.js</a>',
+        '<a class="result__snippet">JavaScript runtime</a>',
+        "</div>"
+      ].join("")
+    } as Response;
   }) as typeof fetch;
 
   const result = await handleWebSearchTool(
@@ -68,12 +74,10 @@ test("WebSearch returns a configuration error when no script is configured", asy
     createContext(workspace)
   );
 
-  assert.equal(result.ok, false);
-  assert.equal(
-    result.error,
-    "WebSearch requires a custom search script. Set \"webSearchTool\" in ~/.deepcode/settings.json."
-  );
-  assert.equal(fetchCalls.length, 0);
+  assert.equal(result.ok, true);
+  assert.match(result.output ?? "", /Node\.js/);
+  assert.match(result.output ?? "", /https:\/\/nodejs\.org\//);
+  assert.equal(fetchCalls.length, 1);
 });
 
 function createContext(

@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import {
   buildSlashCommands,
@@ -8,6 +8,7 @@ import {
   formatSlashCommandLabel
 } from "../ui";
 import type { SkillInfo } from "../session";
+import { getBuiltinSlashCommands, getBuiltinSlashCommandNames } from "../slash-command-manifest";
 
 const skills: SkillInfo[] = [
   { name: "skill-writer", path: "~/.agents/skills/skill-writer/SKILL.md", description: "Write a SKILL.md" },
@@ -19,7 +20,7 @@ test("buildSlashCommands prefixes skills before built-ins", () => {
   assert.equal(items[0].kind, "skill");
   assert.equal(items[0].name, "skill-writer");
   const builtinNames = items.filter((i) => i.kind !== "skill").map((i) => i.name);
-  assert.deepEqual(builtinNames, ["skills", "new", "init", "resume", "exit", "ida", "ce"]);
+  assert.deepEqual(builtinNames, ["skills", "new", "init", "resume", "exit", "ida", "ce", "cbm", "model", "log"]);
 });
 
 test("filterSlashCommands matches partial prefixes", () => {
@@ -56,7 +57,7 @@ test("findExactSlashCommand returns built-in /init", () => {
   const item = findExactSlashCommand(items, "/init");
   assert.ok(item);
   assert.equal(item?.kind, "init");
-  assert.equal(item?.description, "Initialize an AGENTS.md file with instructions for LLM");
+  assert.equal(item?.description, "Regenerate project instructions (automatic when missing)");
 });
 
 test("findExactSlashCommand returns built-in /skills", () => {
@@ -94,4 +95,34 @@ test("formatSlashCommandLabel marks loaded skills", () => {
 
   assert.equal(formatSlashCommandLabel(items[0]), "/loaded ✓");
   assert.equal(formatSlashCommandLabel(items[1]), "/fresh");
+});
+
+test("duplicate skill names require their qualified command", () => {
+  const items = buildSlashCommands([
+    {
+      name: "shared",
+      commandName: "shared@project-shared",
+      path: "./.agents/skills/shared/SKILL.md",
+      description: "Project skill",
+      isAmbiguous: true
+    },
+    {
+      name: "shared",
+      commandName: "shared@user-shared",
+      path: "~/.agents/skills/shared/SKILL.md",
+      description: "User skill",
+      isAmbiguous: true
+    }
+  ]);
+
+  assert.equal(findExactSlashCommand(items, "/shared"), null);
+  assert.equal(findExactSlashCommand(items, "/shared@project-shared")?.skill?.path, "./.agents/skills/shared/SKILL.md");
+});
+
+test("command manifest keeps terminal and Electron command surfaces aligned", () => {
+  const terminalNames = getBuiltinSlashCommands("terminal").map((command) => command.name);
+  const electronNames = getBuiltinSlashCommands("electron").map((command) => command.name);
+
+  assert.deepEqual(electronNames, terminalNames);
+  assert.match(getBuiltinSlashCommandNames("electron"), /\/cbm/);
 });

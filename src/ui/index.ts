@@ -1,4 +1,5 @@
-export { App, readSettings, resolveCurrentSettings, createOpenAIClient } from "./App";
+export { App } from "./App";
+export { readSettings, resolveCurrentSettings, createOpenAIClient } from "../client-factory";
 export { AskUserQuestionPrompt } from "./AskUserQuestionPrompt";
 export { MessageView, parseDiffPreview } from "./MessageView";
 export {

@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 
 const ANSI_RE = /\u001b\[[0-9;]*m/g;

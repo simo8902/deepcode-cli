@@ -6,10 +6,16 @@ import type { SessionMessage } from "../session";
 type Props = {
   message: SessionMessage;
   collapsed?: boolean;
+  busy?: boolean;
 };
 
-export function MessageView({ message, collapsed }: Props): React.ReactElement | null {
+export function MessageView({ message, collapsed, busy }: Props): React.ReactElement | null {
   if (!message.visible) {
+    return null;
+  }
+
+  // When busy, suppress thinking-fluff and tool status lines (footer has it)
+  if (busy && (message.meta?.asThinking || message.role === "tool")) {
     return null;
   }
 
@@ -98,22 +104,61 @@ export function MessageView({ message, collapsed }: Props): React.ReactElement |
   return null;
 }
 
-const TOOL_SOURCE_BADGES: Record<string, { label: string; color: string }> = {
+export const TOOL_SOURCE_BADGES: Record<string, { label: string; color: string }> = {
   // Filesystem MCP
-  read_file: { label: "fs", color: "#4ade80" },
-  read_text_file: { label: "fs", color: "#4ade80" },
-  read_multiple_files: { label: "fs", color: "#4ade80" },
-  read_media_file: { label: "fs", color: "#4ade80" },
-  write_file: { label: "fs", color: "#4ade80" },
-  edit_file: { label: "fs", color: "#4ade80" },
-  create_directory: { label: "fs", color: "#4ade80" },
-  list_directory: { label: "fs", color: "#4ade80" },
-  list_directory_with_sizes: { label: "fs", color: "#4ade80" },
-  directory_tree: { label: "fs", color: "#4ade80" },
-  move_file: { label: "fs", color: "#4ade80" },
-  search_files: { label: "fs", color: "#4ade80" },
-  get_file_info: { label: "fs", color: "#4ade80" },
-  list_allowed_directories: { label: "fs", color: "#4ade80" },
+  read_file: { label: "fs", color: "#64748b" },
+  read_text_file: { label: "fs", color: "#64748b" },
+  read_multiple_files: { label: "fs", color: "#64748b" },
+  read_media_file: { label: "fs", color: "#64748b" },
+  write_file: { label: "fs", color: "#64748b" },
+  edit_file: { label: "fs", color: "#64748b" },
+  create_directory: { label: "fs", color: "#64748b" },
+  list_directory: { label: "fs", color: "#64748b" },
+  list_directory_with_sizes: { label: "fs", color: "#64748b" },
+  directory_tree: { label: "fs", color: "#64748b" },
+  move_file: { label: "fs", color: "#64748b" },
+  search_files: { label: "fs", color: "#64748b" },
+  get_file_info: { label: "fs", color: "#64748b" },
+  list_allowed_directories: { label: "fs", color: "#64748b" },
+  // Codebase Memory MCP
+  index_repository: { label: "cbm", color: "#f472b6" },
+  index_status: { label: "cbm", color: "#f472b6" },
+  list_projects: { label: "cbm", color: "#f472b6" },
+  delete_project: { label: "cbm", color: "#f472b6" },
+  search_graph: { label: "cbm", color: "#f472b6" },
+  search_code: { label: "cbm", color: "#f472b6" },
+  trace_path: { label: "cbm", color: "#f472b6" },
+  detect_changes: { label: "cbm", color: "#f472b6" },
+  query_graph: { label: "cbm", color: "#f472b6" },
+  get_graph_schema: { label: "cbm", color: "#f472b6" },
+  get_code_snippet: { label: "cbm", color: "#f472b6" },
+  get_architecture: { label: "cbm", color: "#f472b6" },
+  manage_adr: { label: "cbm", color: "#f472b6" },
+  ingest_traces: { label: "cbm", color: "#f472b6" },
+  // Serena
+  restart_language_server: { label: "serena", color: "#38bdf8" },
+  get_symbols_overview: { label: "serena", color: "#38bdf8" },
+  find_symbol: { label: "serena", color: "#38bdf8" },
+  find_referencing_symbols: { label: "serena", color: "#38bdf8" },
+  find_implementations: { label: "serena", color: "#38bdf8" },
+  find_declaration: { label: "serena", color: "#38bdf8" },
+  get_diagnostics_for_file: { label: "serena", color: "#38bdf8" },
+  get_diagnostics_for_symbol: { label: "serena", color: "#38bdf8" },
+  replace_symbol_body: { label: "serena", color: "#38bdf8" },
+  insert_after_symbol: { label: "serena", color: "#38bdf8" },
+  insert_before_symbol: { label: "serena", color: "#38bdf8" },
+  rename_symbol: { label: "serena", color: "#38bdf8" },
+  safe_delete_symbol: { label: "serena", color: "#38bdf8" },
+  list_memories: { label: "serena", color: "#38bdf8" },
+  read_memory: { label: "serena", color: "#38bdf8" },
+  write_memory: { label: "serena", color: "#38bdf8" },
+  edit_memory: { label: "serena", color: "#38bdf8" },
+  delete_memory: { label: "serena", color: "#38bdf8" },
+  rename_memory: { label: "serena", color: "#38bdf8" },
+  initial_instructions: { label: "serena", color: "#38bdf8" },
+  check_onboarding_performed: { label: "serena", color: "#38bdf8" },
+  onboarding: { label: "serena", color: "#38bdf8" },
+  get_current_config: { label: "serena", color: "#38bdf8" },
   // Native
   ripgrep_search: { label: "rg", color: "#c084fc" },
   ast_grep_search: { label: "sg", color: "#c084fc" },
@@ -122,7 +167,7 @@ const TOOL_SOURCE_BADGES: Record<string, { label: string; color: string }> = {
 };
 
 function getToolBadge(name: string): { label: string; color: string } {
-  return TOOL_SOURCE_BADGES[name] ?? { label: "serena", color: "#f97316" };
+  return TOOL_SOURCE_BADGES[name] ?? { label: "", color: "#f97316" };
 }
 
 function StatusLine({
@@ -136,17 +181,19 @@ function StatusLine({
 }): React.ReactElement {
   const badge = getToolBadge(name);
   return (
-    <Text wrap="truncate-end">
+    <Text wrap="truncate-end" dimColor>
       {[
-        <Text key="badge" color={badge.color}>{badge.label} › </Text>,
+        badge.label ? <Text key="badge" color={badge.color}>{badge.label} › </Text> : null,
         <Text key="name" bold>{name}</Text>,
-        params ? <Text key="params" color="white">{`  ${params}`}</Text> : null
+        params ? <Text key="params" color="gray">{`  ${params}`}</Text> : null
       ]}
     </Text>
   );
 }
 
 function formatToolStatusParams(summary: ToolSummary): string {
+  // Suppress query display for WebSearch — keeps chat clean
+  if (summary.name === "WebSearch") return "";
   const params = firstNonEmptyLine(summary.params);
   return params;
 }

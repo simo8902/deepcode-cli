@@ -42,7 +42,7 @@ export type PromptSubmission = {
   text: string;
   imageUrls: string[];
   selectedSkills?: SkillInfo[];
-  command?: "new" | "resume" | "exit" | "ida" | "ce";
+  command?: "new" | "resume" | "exit" | "ida" | "ce" | "log" | "cbm";
 };
 
 type Props = {
@@ -50,7 +50,7 @@ type Props = {
   screenWidth: number;
   promptHistory: string[];
   busy: boolean;
-  loadingText?: string | null;
+  loadingText?: { prefix: string; tool: string | null } | null;
   disabled?: boolean;
   placeholder?: string;
   onSubmit: (submission: PromptSubmission) => void;
@@ -58,6 +58,28 @@ type Props = {
 };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function getLoadingToolColor(tool: string): string {
+  const source = tool.split(" › ", 1)[0].trim().toLowerCase();
+  switch (source) {
+    case "fs":
+      return "#64748b";
+    case "cbm":
+      return "#f472b6";
+    case "rg":
+      return "#c084fc";
+    case "sg":
+      return "#f472b6";
+    case "web":
+      return "#22d3ee";
+    case "ask":
+      return "#facc15";
+    default:
+      return tool.startsWith("restart_") || tool.startsWith("find_") || tool.startsWith("get_")
+        ? "#fb923c"
+        : "#f8fafc";
+  }
+}
 
 const PromptPrefixLine = React.memo(function PromptPrefixLine({ busy }: { busy: boolean }): React.ReactElement {
   const [spinnerIndex, setSpinnerIndex] = useState(0);
@@ -102,6 +124,7 @@ export const PromptInput = React.memo(function PromptInput({
   const [draftBeforeHistory, setDraftBeforeHistory] = useState<string | null>(null);
   const [hasTerminalFocus, setHasTerminalFocus] = useState(true);
   const lastCtrlDAt = React.useRef<number>(0);
+  const pendingLargePaste = React.useRef<string>("");
 
   const slashItems = React.useMemo(() => buildSlashCommands(skills), [skills]);
   const slashToken = getCurrentSlashToken(buffer);
@@ -111,10 +134,9 @@ export const PromptInput = React.memo(function PromptInput({
   const footerText = statusMessage
     ? statusMessage
     : busy
-      ? loadingText && loadingText.trim()
-        ? loadingText
-        : "esc to interrupt · ctrl+c to cancel input"
+      ? loadingText?.prefix || ""
       : "";
+  const footerTool = busy ? loadingText?.tool : null;
   useTerminalFocusReporting(stdout, !disabled);
   useHiddenTerminalCursor(stdout, !disabled);
 
@@ -410,6 +432,12 @@ export const PromptInput = React.memo(function PromptInput({
 
     if (input && !key.ctrl && !key.meta) {
       const sanitized = input.replace(/\r/g, "");
+      const lineCount = sanitized.split("\n").length;
+      if (lineCount > 200) {
+        pendingLargePaste.current += sanitized;
+        setStatusMessage("ur long ass copied message was pasted");
+        return;
+      }
       updateBuffer((s) => insertText(s, sanitized));
     }
   }, { isActive: !disabled });
@@ -504,6 +532,30 @@ export const PromptInput = React.memo(function PromptInput({
       setShowSkillsDropdown(false);
       return;
     }
+    if (item.kind === "cbm") {
+      onSubmit({ text: "", imageUrls: [], command: "cbm" });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
+    if (item.kind === "log") {
+      onSubmit({ text: "", imageUrls: [], command: "log" });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
+    if (item.kind === "model") {
+      onSubmit({ text: buffer.text, imageUrls: [] });
+      setBuffer(EMPTY_BUFFER);
+      setImageUrls([]);
+      setSelectedSkills([]);
+      setShowSkillsDropdown(false);
+      return;
+    }
   }
 
   function submitCurrentBuffer(): void {
@@ -513,11 +565,12 @@ export const PromptInput = React.memo(function PromptInput({
     }
 
     const trimmed = buffer.text.trim();
-    if (!trimmed && imageUrls.length === 0 && selectedSkills.length === 0) {
+    const hasPaste = pendingLargePaste.current.length > 0;
+    if (!trimmed && !hasPaste && imageUrls.length === 0 && selectedSkills.length === 0) {
       return;
     }
 
-    if (trimmed.startsWith("/")) {
+    if (trimmed.startsWith("/") && !hasPaste) {
       const exactMatch = findExactSlashCommand(slashItems, trimmed.split(/\s+/, 1)[0]);
       if (exactMatch) {
         handleSlashSelection(exactMatch);
@@ -525,8 +578,12 @@ export const PromptInput = React.memo(function PromptInput({
       }
     }
 
+    const pasteText = pendingLargePaste.current;
+    pendingLargePaste.current = "";
+    const finalText = pasteText ? pasteText + buffer.text : buffer.text;
+
     onSubmit({
-      text: buffer.text,
+      text: finalText,
       imageUrls,
       selectedSkills
     });
@@ -593,7 +650,7 @@ export const PromptInput = React.memo(function PromptInput({
                 <Text key={skill.path || skill.name} color={active ? "cyanBright" : undefined} wrap="truncate-end">
                   {active ? "› " : "  "}
                   {selected ? "●" : "○"}{" "}
-                  <Text bold>{skill.name}</Text>
+                  <Text bold>{skill.commandName ?? skill.name}</Text>
                   {skill.isLoaded ? <Text color="green">  ✓</Text> : null}
                   <Text dimColor>{`  ${skill.path}`}</Text>
                 </Text>
@@ -609,7 +666,11 @@ export const PromptInput = React.memo(function PromptInput({
       ) : null}
       <SlashCommandMenu width={screenWidth} items={slashMenu} activeIndex={menuIndex} />
       {!showMenu && <Box>
-        <Text dimColor>{footerText}</Text>
+        <Text dimColor={!busy}>
+          {footerText ? <Text color={busy ? "#facc15" : undefined} bold={busy}>{footerText}</Text> : null}
+          {footerTool ? <Text color={getLoadingToolColor(footerTool)} bold>{footerTool}</Text> : null}
+          {footerTool ? <Text color="#64748b">...</Text> : null}
+        </Text>
       </Box>}
     </Box>
   );

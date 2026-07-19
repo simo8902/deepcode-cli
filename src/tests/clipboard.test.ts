@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import * as fs from "fs";
 import * as os from "os";
@@ -33,23 +33,46 @@ test("readClipboardImage returns null when no clipboard helpers are installed", 
   assert.equal(result, null);
 });
 
-test("readClipboardImage uses osascript fallback on macOS when pngpaste is missing", async () => {
+const macFallbackTest = ORIGINAL_PLATFORM === "win32" ? test.skip : test;
+
+macFallbackTest("readClipboardImage uses osascript fallback on macOS when pngpaste is missing", async () => {
   const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "deepcode-clipboard-test-bin-"));
   try {
+    const executableExtension = ORIGINAL_PLATFORM === "win32" ? ".cmd" : "";
     fs.writeFileSync(
-      path.join(binDir, "pngpaste"),
-      "#!/bin/sh\nexit 1\n",
+      path.join(binDir, `pngpaste${executableExtension}`),
+      ORIGINAL_PLATFORM === "win32" ? "@exit /b 1\r\n" : "#!/bin/sh\nexit 1\n",
       { mode: 0o755 }
     );
+    const osascriptPath = path.join(binDir, `osascript${executableExtension}`);
+    if (ORIGINAL_PLATFORM === "win32") {
+      fs.writeFileSync(
+        path.join(binDir, "osascript.js"),
+        [
+          "const fs = require('fs');",
+          "const arg = process.argv.find((value) => value.includes('POSIX file'));",
+          "const match = arg && /POSIX file \\\"([^\\\"]+)\\\"/.exec(arg);",
+          "if (!match) process.exit(1);",
+          "fs.writeFileSync(match[1], 'fakepng');"
+        ].join("\n"),
+        "utf8"
+      );
+      fs.writeFileSync(
+        osascriptPath,
+        `@echo off\r\n\"${process.execPath}\" \"%~dp0osascript.js\" %*\r\n`,
+        "utf8"
+      );
+    } else {
     fs.writeFileSync(
-      path.join(binDir, "osascript"),
+      osascriptPath,
       [
         "#!/bin/sh",
         "for arg in \"$@\"; do",
         "  case \"$arg\" in",
-        "    *'open for access POSIX file " + '"' + "'*)",
-        "      path_part=${arg#*POSIX file \\\"}",
-        "      out_path=${path_part%%\\\"*}",
+        "    *'open for access POSIX file '*)",
+        "      path_part=${arg#*POSIX file }",
+        "      out_path=${path_part#\\\"}",
+        "      out_path=${out_path%%\\\"*}",
         "      printf fakepng > \"$out_path\"",
         "      exit 0",
         "      ;;",
@@ -60,6 +83,7 @@ test("readClipboardImage uses osascript fallback on macOS when pngpaste is missi
       ].join("\n"),
       { mode: 0o755 }
     );
+    }
 
     const moduleUrl = new URL(`../ui/clipboard.ts?t=${Date.now()}`, import.meta.url).href;
     const { readClipboardImage } = await import(moduleUrl) as typeof import("../ui/clipboard");

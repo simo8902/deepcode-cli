@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test } from "bun:test";
 import assert from "node:assert/strict";
 import { MessageView, parseDiffPreview } from "../ui";
 import type { SessionMessage } from "../session";

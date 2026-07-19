@@ -1,0 +1,115 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-lg" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="12" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <linearGradient id="trace-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00ff88"/>
+      <stop offset="50%" stop-color="#00ffaa"/>
+      <stop offset="100%" stop-color="#00cc66"/>
+    </linearGradient>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a1a14"/>
+      <stop offset="100%" stop-color="#03080a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background with rounded corners -->
+  <rect width="512" height="512" rx="96" fill="url(#bg-grad)"/>
+
+  <!-- Subtle grid -->
+  <g stroke="rgba(0,255,136,0.04)" stroke-width="1">
+    <line x1="128" y1="0" x2="128" y2="512"/>
+    <line x1="256" y1="0" x2="256" y2="512"/>
+    <line x1="384" y1="0" x2="384" y2="512"/>
+    <line x1="0" y1="128" x2="512" y2="128"/>
+    <line x1="0" y1="256" x2="512" y2="256"/>
+    <line x1="0" y1="384" x2="512" y2="384"/>
+  </g>
+
+  <!-- PCB angular outline -->
+  <path d="M 96 64 L 400 48 L 464 112 L 472 384 L 408 464 L 112 472 L 48 400 L 56 144 Z"
+        fill="none" stroke="rgba(0,255,136,0.2)" stroke-width="2"/>
+
+  <!-- ─── SEVERED TRACES (dead, dark) ─── -->
+  <g stroke="#005533" stroke-width="4" fill="none" stroke-linecap="round">
+    <!-- Left severed trace -->
+    <path d="M 100 160 L 100 240"/>
+    <path d="M 100 272 L 100 360"/>
+    <!-- Right severed trace -->
+    <path d="M 412 140 L 412 220"/>
+    <path d="M 412 280 L 412 380"/>
+    <!-- Top horizontal severed -->
+    <path d="M 180 90 L 330 90"/>
+  </g>
+
+  <!-- Spark dots at break points -->
+  <g fill="#00ff88" opacity="0.9" filter="url(#glow)">
+    <circle cx="100" cy="256" r="5"/>
+    <circle cx="412" cy="250" r="4"/>
+    <circle cx="330" cy="90" r="3"/>
+  </g>
+
+  <!-- ─── THE FRACTURE (jagged crack) ─── -->
+  <path d="M 48 240 L 140 220 L 120 270 L 220 250 L 200 310 L 300 290 L 280 350 L 472 330"
+        fill="none" stroke="rgba(0,0,0,0.6)" stroke-width="3"/>
+  <path d="M 48 240 L 140 220 L 120 270 L 220 250 L 200 310 L 300 290 L 280 350 L 472 330"
+        fill="none" stroke="rgba(0,255,136,0.1)" stroke-width="1"/>
+
+  <!-- ─── MAIN S-TRACE (bold, glowing survivor) ─── -->
+  <!-- Outer glow -->
+  <path d="M 160 140
+           C 300 140, 360 200, 270 256
+           C 180 312, 240 372, 380 372"
+        fill="none" stroke="url(#trace-grad)" stroke-width="16" stroke-linecap="round"
+        filter="url(#glow-lg)" opacity="0.6"/>
+  <!-- Mid glow -->
+  <path d="M 160 140
+           C 300 140, 360 200, 270 256
+           C 180 312, 240 372, 380 372"
+        fill="none" stroke="#00ff88" stroke-width="10" stroke-linecap="round"
+        filter="url(#glow)" opacity="0.8"/>
+  <!-- Bright core -->
+  <path d="M 160 140
+           C 300 140, 360 200, 270 256
+           C 180 312, 240 372, 380 372"
+        fill="none" stroke="#ccffdd" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- ─── SOLDER PADS (bright rings) ─── -->
+  <!-- Top pad -->
+  <circle cx="160" cy="140" r="20" fill="#03080a" stroke="#00ff88" stroke-width="4" filter="url(#glow)"/>
+  <circle cx="160" cy="140" r="8" fill="#00ff88" opacity="0.3"/>
+  <circle cx="160" cy="140" r="3" fill="#ffffff" opacity="0.8"/>
+  <!-- Bottom pad -->
+  <circle cx="380" cy="372" r="20" fill="#03080a" stroke="#00ff88" stroke-width="4" filter="url(#glow)"/>
+  <circle cx="380" cy="372" r="8" fill="#00ff88" opacity="0.3"/>
+  <circle cx="380" cy="372" r="3" fill="#ffffff" opacity="0.8"/>
+
+  <!-- ─── DAEMON NODES (circuit junctions with eyes) ─── -->
+  <!-- Junction 1 (top-right of S curve) -->
+  <rect x="316" y="176" width="24" height="24" rx="4" fill="#03080a" stroke="#00ff88" stroke-width="2" filter="url(#glow)"/>
+  <circle cx="328" cy="188" r="3" fill="#00ff88" filter="url(#glow)"/>
+  <!-- Junction 2 (mid-left of S curve) -->
+  <rect x="172" y="244" width="24" height="24" rx="4" fill="#03080a" stroke="#00ff88" stroke-width="2" filter="url(#glow)"/>
+  <circle cx="184" cy="256" r="3" fill="#00ff88" filter="url(#glow)"/>
+
+  <!-- ─── VIAS (small connection dots) ─── -->
+  <g fill="rgba(0,255,136,0.5)">
+    <circle cx="256" cy="256" r="3"/>
+    <circle cx="220" cy="110" r="3"/>
+    <circle cx="350" cy="420" r="3"/>
+    <circle cx="90" cy="380" r="3"/>
+    <circle cx="420" cy="180" r="3"/>
+  </g>
+
+  <!-- ─── BROKEN CORNER (jagged shard) ─── -->
+  <path d="M 464 112 L 472 96 L 460 130 L 448 108 Z"
+        fill="rgba(0,255,136,0.08)" stroke="rgba(0,255,136,0.3)" stroke-width="1.5"/>
+  <!-- Exposed wire at break -->
+  <path d="M 460 108 L 470 104" stroke="#00ff88" stroke-width="2" filter="url(#glow)"/>
+</svg>

@@ -47,17 +47,214 @@ export async function handleWebSearchTool(
     return executeConfiguredWebSearch(query, scriptPath, context);
   }
 
-  return {
-    ok: false,
-    name: "WebSearch",
-    error:
-      "WebSearch requires a custom search script. Set \"webSearchTool\" in ~/.sbdt/settings.json."
-  };
+  // Built-in fallback: HTTP-based search via DuckDuckGo
+  return executeBuiltInWebSearch(query, context);
 }
 
 function hasUsableClient(value: ReturnType<CreateOpenAIClient> | undefined): value is LLMClientContext {
   return Boolean(value?.client);
 }
+
+// ── Built-in web search (DuckDuckGo HTML scraping) ────────────────────────
+
+const BUILT_IN_SEARCH_TIMEOUT_MS = 15_000;
+const MAX_RESULTS = 10;
+
+type SearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
+async function executeBuiltInWebSearch(
+  query: string,
+  context: ToolExecutionContext
+): Promise<ToolExecutionResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BUILT_IN_SEARCH_TIMEOUT_MS);
+
+  try {
+    const url = buildDuckDuckGoSearchUrl(query);
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "Accept": "text/html",
+        "User-Agent": "sbdt/1.0 (AI-coding-tool; web-search)"
+      }
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        name: "WebSearch",
+        error: `Search request failed with HTTP ${response.status}`,
+        metadata: { status: response.status }
+      };
+    }
+
+    const html = await response.text();
+    const results = parseDuckDuckGoHtml(html).slice(0, MAX_RESULTS);
+
+    if (results.length === 0) {
+      return {
+        ok: false,
+        name: "WebSearch",
+        error: "No results found. The search engine may have blocked the request or returned no matches."
+      };
+    }
+
+    const output = formatSearchResults(results, query);
+    const truncated = output.length > MAX_OUTPUT_CHARS;
+    return {
+      ok: true,
+      name: "WebSearch",
+      output: output.slice(0, MAX_OUTPUT_CHARS),
+      metadata: {
+        resultCount: results.length,
+        truncated
+      }
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("aborted") || message.includes("timeout")) {
+      return {
+        ok: false,
+        name: "WebSearch",
+        error: "Search request timed out."
+      };
+    }
+    return {
+      ok: false,
+      name: "WebSearch",
+      error: `Built-in search failed: ${message}. Configure \"webSearchTool\" in ~/.sbdt/settings.json for custom search.`
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function buildDuckDuckGoSearchUrl(query: string): string {
+  // Use the HTML-only endpoint — easiest to parse, least likely to need JS
+  const params = new URLSearchParams({ q: query, kl: "us-en" });
+  return `https://html.duckduckgo.com/html/?${params.toString()}`;
+}
+
+function parseDuckDuckGoHtml(html: string): SearchResult[] {
+  const results: SearchResult[] = [];
+
+  // DuckDuckGo HTML results are in <div class="result"> blocks.
+  // Each contains an <a class="result__a"> for title/url and
+  // <a class="result__snippet"> for the snippet.
+  const resultBlockRegex = /<div[^>]*class="[^"]*result[^"]*"[^>]*>[\s\S]*?<\/div>\s*(?=<div[^>]*class="[^"]*result|"nav-link"|$)/gi;
+
+  let match: RegExpExecArray | null;
+  while ((match = resultBlockRegex.exec(html)) !== null) {
+    const block = match[0];
+
+    // Extract link: <a ... class="result__a" href="...">title</a>
+    const linkMatch = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+    if (!linkMatch) continue;
+
+    const rawUrl = linkMatch[1];
+    const title = stripHtml(linkMatch[2]).trim();
+
+    // DuckDuckGo wraps external URLs via a redirect; extract the real URL
+    const url = extractRealUrl(rawUrl) || rawUrl;
+
+    // Extract snippet
+    const snippetMatch = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+    const snippet = snippetMatch ? stripHtml(snippetMatch[1]).trim() : "";
+
+    if (!title || !url) continue;
+    results.push({ title, url, snippet });
+  }
+
+  // Fallback: try simpler regex if structured parsing yielded nothing
+  if (results.length === 0) {
+    return parseDuckDuckGoHtmlFallback(html);
+  }
+
+  return results;
+}
+
+function parseDuckDuckGoHtmlFallback(html: string): SearchResult[] {
+  const results: SearchResult[] = [];
+  // Find all links with class containing "result"
+  const linkRegex = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRegex = /<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+
+  const links: Array<{ url: string; title: string }> = [];
+  const snippets: string[] = [];
+
+  let m: RegExpExecArray | null;
+  while ((m = linkRegex.exec(html)) !== null) {
+    const rawUrl = m[1];
+    const title = stripHtml(m[2]).trim();
+    const url = extractRealUrl(rawUrl) || rawUrl;
+    if (title && url) links.push({ url, title });
+  }
+
+  while ((m = snippetRegex.exec(html)) !== null) {
+    snippets.push(stripHtml(m[1]).trim());
+  }
+
+  for (let i = 0; i < Math.min(links.length, snippets.length); i++) {
+    results.push({ ...links[i], snippet: snippets[i] });
+  }
+
+  return results;
+}
+
+function extractRealUrl(rawUrl: string): string | null {
+  // DuckDuckGo redirect URLs look like: //duckduckgo.com/l/?uddg=...&rut=...
+  try {
+    const decoded = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+    const parsed = new URL(decoded);
+    const uddg = parsed.searchParams.get("uddg");
+    if (uddg) {
+      return decodeURIComponent(uddg);
+    }
+    // If it's a direct URL (not a redirect), return as-is
+    if (parsed.hostname && !parsed.hostname.includes("duckduckgo.com")) {
+      return decoded;
+    }
+  } catch {
+    // not a valid URL, ignore
+  }
+  return null;
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&nbsp;/g, " ");
+}
+
+function formatSearchResults(results: SearchResult[], _query: string): string {
+  if (results.length === 0) {
+    return `No results found.`;
+  }
+
+  const lines: string[] = [`Web search results:`, ""];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    lines.push(`${i + 1}. ${r.title}`);
+    lines.push(`   URL: ${r.url}`);
+    if (r.snippet) {
+      lines.push(`   ${r.snippet}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+// ── External script search (existing) ─────────────────────────────────────
 
 async function executeConfiguredWebSearch(
   query: string,
@@ -117,10 +314,17 @@ async function runWebSearchScript(
   context: ToolExecutionContext
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null; signal: string | null; error?: string }> {
   return new Promise((resolve) => {
-    const child = spawn(scriptPath, [query], {
+    // On Windows, .cjs/.js/.mjs files can't be spawned directly (EFTYPE).
+    // Detect JS extensions and run through node.
+    const isJsScript = /\.(c|m)?js$/i.test(scriptPath);
+    const spawnCmd = isJsScript ? "node" : scriptPath;
+    const spawnArgs = isJsScript ? [scriptPath, query] : [query];
+
+    const child = spawn(spawnCmd, spawnArgs, {
       cwd: context.projectRoot,
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     const pid = child.pid;
     if (typeof pid === "number") {

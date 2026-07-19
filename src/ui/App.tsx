@@ -7,6 +7,7 @@ import * as path from "path";
 import OpenAI from "openai";
 import {
   SessionManager,
+  getCompactPromptTokenThreshold,
   type LlmStreamProgress,
   type SessionEntry,
   type SessionMessage,
@@ -21,8 +22,15 @@ import {
   type ProviderPrivacyMode,
   type ReasoningEffort
 } from "../settings";
+import {
+  createOpenAIClient,
+  resolveCurrentSettings,
+  readSettings,
+  DEFAULT_MODEL,
+  DEFAULT_BASE_URL
+} from "../client-factory";
 import { PromptInput, type PromptSubmission } from "./PromptInput";
-import { MessageView } from "./MessageView";
+import { MessageView, TOOL_SOURCE_BADGES } from "./MessageView";
 import { SessionList } from "./SessionList";
 import { buildLoadingText } from "./loadingText";
 import { findExpandedThinkingId } from "./thinkingState";
@@ -35,18 +43,47 @@ import {
 } from "./askUserQuestion";
 import { buildExitSummaryText } from "./exitSummary";
 
-const DEFAULT_MODEL = "deepseek-v4-pro";
-const DEFAULT_BASE_URL = "https://api.deepseek.com";
+
 
 type View = "chat" | "session-list";
 
 type AppProps = {
   projectRoot: string;
   version?: string;
+  resumeSessionId?: string | null;
   onRestart?: () => void;
+  onSessionManagerReady?: (manager: import("../session").SessionManager) => void;
 };
 
-export function App({ projectRoot, version = "", onRestart }: AppProps): React.ReactElement {
+function formatToolLine(toolName: string, rawParams: string, projectRoot: string): string {
+  const badge = TOOL_SOURCE_BADGES[toolName] ?? { label: "", color: "#f97316" };
+  const prefix = badge.label ? `${badge.label} › ` : "";
+  let params = "";
+  if (rawParams) {
+    try {
+      const parsed = JSON.parse(rawParams);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        params = Object.entries(parsed as Record<string, unknown>)
+          .filter(([, v]) => v !== undefined && v !== null && v !== "" && v !== false)
+          .map(([k, v]) => `${k}=${typeof v === "string" ? resolveDisplayPath(v, projectRoot) : JSON.stringify(v)}`)
+          .join("  ");
+      }
+    } catch {
+      params = rawParams;
+    }
+  }
+  return `${prefix}${toolName}${params ? `  ${params}` : ""}`;
+}
+
+function resolveDisplayPath(value: string, projectRoot: string): string {
+  if (!value.includes("/") && !value.includes("\\")) return value;
+  if (path.isAbsolute(value)) return value;
+  const absolute = path.resolve(projectRoot, value);
+  const base = path.resolve(projectRoot, "..");
+  return `${path.sep}${path.relative(base, absolute)}`;
+}
+
+export function App({ projectRoot, version = "", resumeSessionId = null, onRestart, onSessionManagerReady }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout, write } = useStdout();
   const { columns } = useWindowSize();
@@ -59,6 +96,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [errorLine, setErrorLine] = useState<string | null>(null);
   const [streamProgress, setStreamProgress] = useState<LlmStreamProgress | null>(null);
   const [runningProcesses, setRunningProcesses] = useState<SessionEntry["processes"]>(null);
+  const [activeTool, setActiveTool] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<SessionStatus | null>(null);
   const [dismissedQuestionIds, setDismissedQuestionIds] = useState<Set<string>>(() => new Set());
   const [isExiting, setIsExiting] = useState(false);
@@ -67,21 +105,24 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   const [nowTick, setNowTick] = useState(0);
   const [balance, setBalance] = useState<string>("");
   const [mcpHealth, setMcpHealth] = useState<string>("");
+  const [modelOverride, setModelOverride] = useState<string | null>(null);
 
   const messagesRef = useRef<SessionMessage[]>([]);
   messagesRef.current = messages;
+  const modelOverrideRef = useRef(modelOverride);
+  modelOverrideRef.current = modelOverride;
 
   const sessionManager = useMemo(() => {
     return new SessionManager({
       projectRoot,
-      createOpenAIClient: () => createOpenAIClient(),
-      getResolvedSettings: () => resolveCurrentSettings(),
+      createOpenAIClient: () => createOpenAIClient(modelOverrideRef.current ?? undefined),
+      getResolvedSettings: () => resolveCurrentSettings(modelOverrideRef.current ?? undefined),
       renderMarkdown: (text) => text,
       onAssistantMessage: (message: SessionMessage) => {
         setMessages((prev) => [...prev, message]);
       },
       onSessionEntryUpdated: (entry) => {
-        setStatusLine(buildStatusLine(entry));
+        setStatusLine(buildStatusLine(entry, resolveCurrentSettings(modelOverrideRef.current ?? undefined).model, resolveCurrentSettings(modelOverrideRef.current ?? undefined).contextWindow));
         setRunningProcesses(entry.processes);
         setActiveStatus(entry.status);
       },
@@ -94,9 +135,30 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           return;
         }
         setStreamProgress(progress);
+      },
+      onToolCall: (toolName: string, params: string) => {
+        setActiveTool(formatToolLine(toolName, params, projectRoot));
       }
     });
   }, [projectRoot]);
+
+  // Notify CLI of the session manager instance
+  useEffect(() => {
+    onSessionManagerReady?.(sessionManager);
+  }, []);
+
+  // If --resume was provided, load that session instead of creating a new one
+  useEffect(() => {
+    if (!resumeSessionId) return;
+    const session = sessionManager.getSession(resumeSessionId);
+    if (!session) {
+      setErrorLine(`Session not found: ${resumeSessionId}. Create a new session instead.`);
+      return;
+    }
+    sessionManager.setActiveSessionId(resumeSessionId);
+    setShowWelcome(false);
+    setMessages(sessionManager.listSessionMessages(resumeSessionId).filter(m => m.visible));
+  }, [resumeSessionId]);
 
   useEffect(() => {
     if (!busy) {
@@ -131,7 +193,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   }
 
   async function refreshBalance(): Promise<void> {
-    const settings = resolveCurrentSettings();
+    const settings = resolveCurrentSettings(modelOverrideRef.current ?? undefined);
     if (!settings.apiKey || !isDeepSeekBaseURL(settings.baseURL)) {
       return;
     }
@@ -155,6 +217,37 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
 
   const writeRef = useRef(write);
   writeRef.current = write;
+  function handleModelCommand(fullText: string): void {
+    const parts = fullText.split(/\s+/);
+    const modelName = parts.slice(1).join(" ").trim();
+    const settings = readSettings() ?? {};
+    const models = settings.models ?? {};
+
+    if (!modelName) {
+      // List available models
+      const entries = Object.entries(models);
+      if (entries.length === 0) {
+        setStatusLine("No saved models. Add them in ~/.sbdt/settings.json under 'models'.");
+        return;
+      }
+      const active = modelOverride ?? settings.activeModel ?? "(none)";
+      const lines = entries.map(([name, env]) =>
+        `${name === active ? "*" : " "} ${name}  →  ${env.MODEL || "?"} @ ${env.BASE_URL || "default"}`
+      );
+      setStatusLine(`Models: ${lines.join(" | ")}`);
+      return;
+    }
+
+    if (!models[modelName]) {
+      setStatusLine(`Model "${modelName}" not found. Available: ${Object.keys(models).join(", ") || "none"}`);
+      return;
+    }
+
+    // Switch to the selected model (per-terminal, not global)
+    setModelOverride(modelName);
+    setStatusLine(`Switched to model "${modelName}" (${models[modelName].MODEL || "?"}).`);
+  }
+
   const handlePrompt = useCallback(
     async (submission: PromptSubmission) => {
       if (submission.command === "exit") {
@@ -165,7 +258,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           const allMessages = activeSessionId
             ? sessionManager.listSessionMessages(activeSessionId)
             : messagesRef.current;
-          const resolved = resolveCurrentSettings();
+          const resolved = resolveCurrentSettings(modelOverrideRef.current ?? undefined);
           const summary = buildExitSummaryText({ session, messages: allMessages, model: resolved.model });
           process.stdout.write("\n");
           process.stdout.write(chalk.green("> /exit "));
@@ -207,6 +300,46 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
           setStatusLine(status);
           refreshSessionsList();
         });
+        return;
+      }
+      if (submission.command === "cbm") {
+        sessionManager.reconnectCodebaseMemory().then((status) => {
+          setStatusLine(status);
+          refreshSessionsList();
+        });
+        return;
+      }
+
+      if (submission.command === "log") {
+        const activeSessionId = sessionManager.getActiveSessionId();
+        if (!activeSessionId) {
+          setErrorLine("No active session to log.");
+          return;
+        }
+        const logContent = sessionManager.getSessionToolLog(activeSessionId);
+        // Write to a file in the project directory
+        const logPath = path.join(projectRoot, "tool-log.md");
+        fs.writeFileSync(logPath, logContent, "utf8");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: "system" as const,
+            sessionId: activeSessionId,
+            content: `Tool log written to: ${logPath}`,
+            contentParams: null,
+            messageParams: null,
+            compacted: false,
+            visible: true,
+            createTime: new Date().toISOString(),
+            updateTime: new Date().toISOString()
+          }
+        ]);
+        return;
+      }
+
+      if (submission.text?.trim().startsWith("/model")) {
+        handleModelCommand(submission.text.trim());
         return;
       }
 
@@ -253,6 +386,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setBusy(false);
         setStreamProgress(null);
         setRunningProcesses(null);
+        setActiveTool(null);
       }
     },
     [exit, onRestart, sessionManager]
@@ -285,7 +419,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
         setShowWelcome(true);
       }, 0);
       const session = sessionManager.getSession(sessionId);
-      setStatusLine(session ? buildStatusLine(session) : "");
+      setStatusLine(session ? buildStatusLine(session, resolveCurrentSettings(modelOverrideRef.current ?? undefined).model, resolveCurrentSettings(modelOverrideRef.current ?? undefined).contextWindow) : "");
       setRunningProcesses(session?.processes ?? null);
       setActiveStatus(session?.status ?? null);
       await refreshSkills(sessionId);
@@ -315,11 +449,11 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
   );
   const loadingText = useMemo(
     () => busy
-      ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, now: Date.now() })
+      ? buildLoadingText({ progress: streamProgress, processes: runningProcesses, activeTool, now: Date.now() })
       : null,
-    [busy, streamProgress, runningProcesses, nowTick]
+    [busy, streamProgress, runningProcesses, activeTool, nowTick]
   );
-  const welcomeSettings = useMemo(() => resolveCurrentSettings(), []);
+  const welcomeSettings = useMemo(() => resolveCurrentSettings(modelOverrideRef.current ?? undefined), []);
   const welcomeItem: SessionMessage = useMemo(() => ({
     id: `__welcome__${welcomeNonce}`,
     sessionId: "",
@@ -377,6 +511,7 @@ export function App({ projectRoot, version = "", onRestart }: AppProps): React.R
               key={item.id}
               message={item}
               collapsed={isCollapsedThinking(item, expandedThinkingId)}
+              busy={busy}
             />
           );
         }}
@@ -461,7 +596,12 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-function buildStatusLine(entry: SessionEntry): string {
+function formatContextPreview(promptTokens: number, contextLimit: number): string {
+  const pct = Math.round((promptTokens / contextLimit) * 100);
+  return `context: ${fmtTokens(promptTokens)}/${fmtTokens(contextLimit)} (${pct}%)`;
+}
+
+function buildStatusLine(entry: SessionEntry, model?: string, contextWindow?: number): string {
   const parts: string[] = [];
   parts.push(`status: ${entry.status}`);
 
@@ -475,6 +615,10 @@ function buildStatusLine(entry: SessionEntry): string {
       if (cacheHit > 0) tok += ` - cache: ${fmtTokens(cacheHit)}`;
       parts.push(tok);
     }
+    if (prompt > 0 && model) {
+      const limit = contextWindow ?? getCompactPromptTokenThreshold(model);
+      parts.push(formatContextPreview(prompt, limit));
+    }
   } else if (typeof entry.activeTokens === "number" && entry.activeTokens > 0) {
     parts.push(`tokens: ${entry.activeTokens}`);
   }
@@ -485,14 +629,13 @@ function buildStatusLine(entry: SessionEntry): string {
   return parts.join(" - ");
 }
 
-function buildMcpHealthLine(health: { fs: { ready: boolean; error?: string }; cb: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }): string {
+function buildMcpHealthLine(health: { fs: { ready: boolean; error?: string }; serena: { ready: boolean; error?: string } }): string {
   const items: string[] = [];
   const fmt = (label: string, h: { ready: boolean; error?: string }) => {
     if (h.ready) return label + " \u2713";
     return label + " \u2717";
   };
   items.push(fmt("fs", health.fs));
-  items.push(fmt("cb", health.cb));
   items.push(fmt("serena", health.serena));
   return "mcp: " + items.join(" | ");
 }
@@ -506,102 +649,4 @@ function isDeepSeekBaseURL(baseURL: string | undefined): boolean {
   }
 }
 
-export function readSettings(): DeepcodingSettings | null {
-  try {
-    const settingsPath = path.join(os.homedir(), ".sbdt", "settings.json");
-    if (!fs.existsSync(settingsPath)) {
-      return null;
-    }
-    const raw = fs.readFileSync(settingsPath, "utf8");
-    return JSON.parse(raw) as DeepcodingSettings;
-  } catch {
-    return null;
-  }
-}
-
-export function resolveCurrentSettings(): ReturnType<typeof resolveSettings> {
-  return resolveSettings(readSettings(), {
-    model: DEFAULT_MODEL,
-    baseURL: DEFAULT_BASE_URL
-  });
-}
-
-export function createOpenAIClient(): {
-  client: OpenAI | null;
-  model: string;
-  baseURL: string;
-  thinkingEnabled: boolean;
-  reasoningEffort: ReasoningEffort;
-  debugLogEnabled: boolean;
-  notify?: string;
-  webSearchTool?: string;
-  machineId?: string;
-  provider?: string;
-  providerPrivacyMode: ProviderPrivacyMode;
-  zdr?: boolean;
-  dataCollection?: DataCollection;
-  cacheControl?: boolean;
-} {
-  const settings = resolveCurrentSettings();
-  if (!settings.apiKey) {
-    return {
-      client: null,
-      model: settings.model,
-      baseURL: settings.baseURL,
-      thinkingEnabled: settings.thinkingEnabled,
-      reasoningEffort: settings.reasoningEffort,
-      debugLogEnabled: settings.debugLogEnabled,
-      notify: settings.notify,
-      webSearchTool: settings.webSearchTool,
-      machineId: getMachineId(),
-      provider: settings.provider,
-      providerPrivacyMode: settings.providerPrivacyMode,
-      zdr: settings.zdr,
-      dataCollection: settings.dataCollection,
-      cacheControl: settings.cacheControl
-    };
-  }
-
-  const client = new OpenAI({
-    apiKey: settings.apiKey,
-    baseURL: settings.baseURL || undefined,
-    defaultHeaders: {
-      "Authorization": `Bearer ${settings.apiKey}`,
-      "X-OpenRouter-Experimental-Metadata": "1"
-    }
-  });
-  return {
-    client,
-    model: settings.model,
-    baseURL: settings.baseURL,
-    thinkingEnabled: settings.thinkingEnabled,
-    reasoningEffort: settings.reasoningEffort,
-    debugLogEnabled: settings.debugLogEnabled,
-    notify: settings.notify,
-    webSearchTool: settings.webSearchTool,
-    machineId: getMachineId(),
-    provider: settings.provider,
-    providerPrivacyMode: settings.providerPrivacyMode,
-    zdr: settings.zdr,
-    dataCollection: settings.dataCollection,
-    cacheControl: settings.cacheControl
-  };
-}
-
-function getMachineId(): string | undefined {
-  try {
-    const idPath = path.join(os.homedir(), ".sbdt", "machine-id");
-    if (fs.existsSync(idPath)) {
-      const raw = fs.readFileSync(idPath, "utf8").trim();
-      if (raw) {
-        return raw;
-      }
-    }
-    const generated = `${os.hostname()}-${Math.random().toString(36).slice(2)}-${Date.now()}`;
-    fs.mkdirSync(path.dirname(idPath), { recursive: true });
-    fs.writeFileSync(idPath, generated, "utf8");
-    return generated;
-  } catch {
-    return undefined;
-  }
-}
+// Client factory functions extracted to ../client-factory.ts

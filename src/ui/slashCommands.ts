@@ -1,6 +1,10 @@
 import type { SkillInfo } from "../session";
+import {
+  getBuiltinSlashCommands,
+  type BuiltinSlashCommandKind
+} from "../slash-command-manifest";
 
-export type SlashCommandKind = "skill" | "skills" | "new" | "init" | "resume" | "exit" | "ida" | "ce";
+export type SlashCommandKind = "skill" | BuiltinSlashCommandKind;
 
 export type SlashCommandItem = {
   kind: SlashCommandKind;
@@ -10,57 +14,21 @@ export type SlashCommandItem = {
   skill?: SkillInfo;
 };
 
-export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = [
-  {
-    kind: "skills",
-    name: "skills",
-    label: "/skills",
-    description: "List available skills"
-  },
-  {
-    kind: "new",
-    name: "new",
-    label: "/new",
-    description: "Start a fresh conversation"
-  },
-  {
-    kind: "init",
-    name: "init",
-    label: "/init",
-    description: "Initialize an AGENTS.md file with instructions for LLM"
-  },
-  {
-    kind: "resume",
-    name: "resume",
-    label: "/resume",
-    description: "Pick a previous conversation to continue"
-  },
-  {
-    kind: "exit",
-    name: "exit",
-    label: "/exit",
-    description: "Quit Deep Code CLI"
-  },
-  {
-    kind: "ida",
-    name: "ida",
-    label: "/ida",
-    description: "Reconnect to IDA Pro MCP server"
-  },
-  {
-    kind: "ce",
-    name: "ce",
-    label: "/CE",
-    description: "Reconnect to Cheat Engine MCP server"
-  }
-];
+export const BUILTIN_SLASH_COMMANDS: SlashCommandItem[] = getBuiltinSlashCommands("terminal").map((command) => ({
+  kind: command.kind,
+  name: command.name,
+  label: command.label,
+  description: command.description
+}));
 
 export function buildSlashCommands(skills: SkillInfo[]): SlashCommandItem[] {
   const skillItems: SlashCommandItem[] = skills.map((skill) => ({
     kind: "skill",
-    name: skill.name,
-    label: `/${skill.name}`,
-    description: skill.description || "(no description)",
+    name: skill.commandName ?? skill.name,
+    label: `/${skill.commandName ?? skill.name}`,
+    description: skill.isAmbiguous
+      ? `${skill.description || "(no description)"} [duplicate name; qualified command required]`
+      : skill.description || "(no description)",
     skill
   }));
   return [...skillItems, ...BUILTIN_SLASH_COMMANDS];
